@@ -25,7 +25,7 @@ public class RequestGuard extends OncePerRequestFilter {
    }
    if(req.getContentLengthLong()>1_000_000){res.sendError(413);return;}
   }
-  if(req.getRequestURI().startsWith("/api/")) {
+  if(req.getRequestURI().startsWith("/api/")&&!req.getRequestURI().equals("/api/health")) {
    String visitor=null;
    if(req.getCookies()!=null)for(var cookie:req.getCookies())if(cookie.getName().equals("ATOMS_VISITOR")&&cookie.getValue().matches("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}"))visitor=cookie.getValue();
    if(visitor==null)visitor=UUID.randomUUID().toString();

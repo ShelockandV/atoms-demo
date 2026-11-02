@@ -140,3 +140,7 @@ iframe 不是资源隔离容器，恶意死循环仍可能影响浏览器；“�
 GitHub仓库保存源码，GitHub Actions自动构建包含前端的Java应用。完整服务使用Docker运行Java、MySQL和Caddy网关；GitHub Pages不能运行本项目的Java后端和MySQL。
 
 部署步骤见 [GitHub与公网部署](docs/GitHub与公网部署.md)。私有配置和数据库密码均排除Git与Docker构建上下文，不要手动强制添加这些文件。
+
+### Railway
+
+使用Railway时按 [Railway部署说明](docs/Railway部署.md) 创建应用与MySQL服务，并设置 `SPRING_PROFILES_ACTIVE=railway`。应用自动监听平台端口并通过 `/api/health` 检查数据库连接。密钥只放Railway私密变量，不提交GitHub。
