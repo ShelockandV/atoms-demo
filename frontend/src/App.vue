@@ -4,6 +4,7 @@ import { ArrowUp, ArrowUpRight, Plus, Search, PanelLeftClose, PanelLeftOpen, Spa
 import { api, type Project, type Detail, type Files, type Run, type Version, type Mode, type ModelConfig } from './api'
 import { canPreview, previewDocument } from './preview'
 import ModeControls from './ModeControls.vue'
+import { randomId } from './randomId'
 const projects = ref<Project[]>([]), project = ref<Detail | null>(null)
 const config = ref<ModelConfig>({ demo:true, model:'', configured:false, models:{build:[],chat:[],image:[]}, defaults:{build:'',chat:'',image:''} }), connected = ref(false)
 const mode=ref<Mode>('build'), selectedModel=ref('')
@@ -36,7 +37,7 @@ function notify(text:string){toast.value=text;if(toastTimer)clearTimeout(toastTi
 function report(e:unknown){error.value=e instanceof Error?e.message:'操作失败，请重试'}
 function disconnect(){events?.close();events=null;if(poll)clearInterval(poll);poll=null}
 async function refreshList(){projects.value=await api<Project[]>('/projects')}
-function runPreview(){runtimeError.value='';if(!browserPreview.value){preview.value='';stopped.value=false;if(selectedVersion.value&&view.value==='preview')view.value='code';return}try{token.value=crypto.randomUUID();preview.value=previewDocument(files.value,token.value);stopped.value=false}catch(e){runtimeError.value=e instanceof Error?e.message:'预览失败'}}
+function runPreview(){runtimeError.value='';if(!browserPreview.value){preview.value='';stopped.value=false;if(selectedVersion.value&&view.value==='preview')view.value='code';return}try{token.value=randomId();preview.value=previewDocument(files.value,token.value);stopped.value=false}catch(e){runtimeError.value=e instanceof Error?e.message:'预览失败'}}
 function chooseVersion(v:Version){if(dirty.value&&!window.confirm('当前代码尚未保存，切换版本会放弃修改。继续吗？'))return;selectedVersion.value=v.id;loadFiles(v)}
 async function openProject(id:string, force=false){
  if(!force&&dirty.value&&!window.confirm('当前代码尚未保存，切换项目会放弃修改。继续吗？'))return
@@ -51,7 +52,7 @@ async function submit(){
  creating.value=true;error.value=''
  try{let id=project.value?.id;if(!id){const p=await api<Project>('/projects','POST',{title:prompt.value.trim().slice(0,28)});id=p.id;await openProject(id,true);await refreshList()}
  const text=prompt.value.trim();const run=await api<Run>(`/projects/${id}/runs`,'POST',{prompt:text,baseVersion:project.value?.currentVersion??null,mode:mode.value,model:selectedModel.value});prompt.value='';
- if(project.value?.id===id){project.value.messages.push({id:crypto.randomUUID(),role:'user',content:text,mode:mode.value,model:selectedModel.value,createdAt:new Date().toISOString()});project.value.run=run;watchRun(run.id,id)}
+ if(project.value?.id===id){project.value.messages.push({id:randomId(),role:'user',content:text,mode:mode.value,model:selectedModel.value,createdAt:new Date().toISOString()});project.value.run=run;watchRun(run.id,id)}
  }catch(e){report(e)}finally{creating.value=false}
 }
 function watchRun(rid:string,pid:string){
