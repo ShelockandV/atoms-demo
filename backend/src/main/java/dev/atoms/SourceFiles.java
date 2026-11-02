@@ -10,8 +10,8 @@ import java.util.zip.*;
 final class SourceFiles {
  private SourceFiles(){}
  static boolean canPreview(Map<String,String> files) {
-  return files!=null && files.keySet().containsAll(Set.of("index.html","style.css","script.js"))
-   && files.keySet().stream().allMatch(name -> Set.of("index.html","style.css","script.js").contains(name)||name.toLowerCase(Locale.ROOT).endsWith(".md"));
+  return files!=null && (files.containsKey("index.html")
+   || files.keySet().stream().filter(name -> name.endsWith("/index.html")).count()==1);
  }
  static void validate(Map<String,String> files) {
   if(files==null||files.isEmpty()||files.size()>80)throw new IllegalArgumentException("一个版本须包含1～80个源码文件");
@@ -27,7 +27,7 @@ final class SourceFiles {
   // A file and its parent directory cannot share a path on disk.
   for(String path:paths){int slash=path.indexOf('/');while(slash>=0){if(paths.contains(path.substring(0,slash)))throw new IllegalArgumentException("源码文件与目录路径冲突");slash=path.indexOf('/',slash+1);}}
   if(total>1_000_000||!nonEmpty)throw new IllegalArgumentException("源码总量不能超过1MB，且不能全部为空");
-  if(canPreview(files)) {
+  if(files.keySet().containsAll(Set.of("index.html","style.css","script.js"))) {
    if(!files.get("index.html").toLowerCase(Locale.ROOT).contains("<body"))throw new IllegalArgumentException("HTML缺少body");
    var env=new CompilerEnvirons();env.setLanguageVersion(Context.VERSION_ES6);
    try{new Parser(env).parse(files.get("script.js"),"script.js",1);}catch(EvaluatorException e){throw new IllegalArgumentException("JavaScript语法错误："+e.getMessage());}

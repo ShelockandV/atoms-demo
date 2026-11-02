@@ -37,7 +37,7 @@ function notify(text:string){toast.value=text;if(toastTimer)clearTimeout(toastTi
 function report(e:unknown){error.value=e instanceof Error?e.message:'操作失败，请重试'}
 function disconnect(){events?.close();events=null;if(poll)clearInterval(poll);poll=null}
 async function refreshList(){projects.value=await api<Project[]>('/projects')}
-function runPreview(){runtimeError.value='';if(!browserPreview.value){preview.value='';stopped.value=false;if(selectedVersion.value&&view.value==='preview')view.value='code';return}try{token.value=randomId();preview.value=previewDocument(files.value,token.value);stopped.value=false}catch(e){runtimeError.value=e instanceof Error?e.message:'预览失败'}}
+function runPreview(){runtimeError.value='';if(!browserPreview.value){preview.value='';stopped.value=false;if(selectedVersion.value&&view.value==='preview')view.value='code';return}preview.value='';try{token.value=randomId();preview.value=previewDocument(files.value,token.value);stopped.value=false}catch(e){runtimeError.value=e instanceof Error?e.message:'预览失败'}}
 function chooseVersion(v:Version){if(dirty.value&&!window.confirm('当前代码尚未保存，切换版本会放弃修改。继续吗？'))return;selectedVersion.value=v.id;loadFiles(v)}
 async function openProject(id:string, force=false){
  if(!force&&dirty.value&&!window.confirm('当前代码尚未保存，切换项目会放弃修改。继续吗？'))return
@@ -57,7 +57,7 @@ async function submit(){
 }
 function watchRun(rid:string,pid:string){
  disconnect();let finishing=false
- async function receive(run:Run){if(project.value?.id!==pid||disposed)return;project.value.run=run;if(['SUCCEEDED','FAILED'].includes(run.status)&&!finishing){finishing=true;disconnect();await openProject(pid,true);if(run.status==='FAILED')error.value=run.error||'任务失败';if(run.mode==='image'&&run.status==='SUCCEEDED')view.value='images';await refreshList()}}
+ async function receive(run:Run){if(project.value?.id!==pid||disposed)return;project.value.run=run;if(['SUCCEEDED','FAILED'].includes(run.status)&&!finishing){finishing=true;disconnect();await openProject(pid,true);if(run.status==='FAILED')error.value=run.error||'任务失败';if(run.status==='SUCCEEDED'){if(run.mode==='image')view.value='images';else if(run.mode==='build')view.value=browserPreview.value?'preview':'code';}await refreshList()}}
  events=new EventSource(`/api/runs/${rid}/events`);events.addEventListener('status',event=>{void receive(JSON.parse((event as MessageEvent).data))});
  // Polling is also the recovery path when a proxy buffers SSE or the connection drops.
  poll=setInterval(async()=>{try{await receive(await api<Run>('/runs/'+rid))}catch(e){report(e)}},2500)
