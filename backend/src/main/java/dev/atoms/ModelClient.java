@@ -77,7 +77,7 @@ public class ModelClient {
   return completion(messages,selectedModel);
  }
  String plan(String prompt,String selectedModel) throws Exception {
-  return demo?"演示模式：使用内置模板展示流程；支持记账、任务看板、落地页及Java后端示例。任意自然语言修改需要配置真实模型。":call("你是一位软件工程师。先判断用户要求的是前端页面还是后端工程，遵循明确指定的语言与框架。用中文简述技术栈、源码目录、核心能力和实现步骤，最多250字。后端工程应包含构建配置与启动说明。",prompt,selectedModel);
+  return demo?"演示模式：使用内置模板展示流程；支持记账、任务看板、落地页及Java后端示例。任意自然语言修改需要配置真实模型。":call("你是一位软件工程师。先判断用户要求的是前端页面还是后端工程，遵循明确指定的语言与框架。前端预览运行在隔离iframe中，计划不得使用eval、Function构造器、localStorage或cookie；计算器使用普通函数实现运算。用中文简述技术栈、源码目录、核心能力和实现步骤，最多250字。后端工程应包含构建配置与启动说明。",prompt,selectedModel);
  }
  Map<String,String> generate(String prompt,String plan,Map<String,String> current,String failure,String selectedModel) throws Exception {
   if(demo) return DemoTemplates.create(prompt,current);
@@ -86,7 +86,7 @@ public class ModelClient {
    只输出一个JSON对象：每个键是文件相对路径，每个值是该文件完整文本内容。不要包装files字段，不要Markdown围栏，不要把源码嵌入HTML展示，不要省略为伪代码或省略号。
    最多80个文件，总量小于1MB。使用正斜杠目录，禁止绝对路径及..。返回完整版本快照，不是补丁。
    如果用户要求Java/Spring Boot等后端，生成pom.xml、src/main/java/...源文件、配置文件和README.md启动说明。其他后端语言也按其实际工程结构输出。不要附带无关的静态三文件模板。使用占位配置，不生成真实密钥。
-   如果用户要求可在浏览器直接体验的前端页面，默认输出index.html、style.css、script.js（可附README.md）。只用原生HTML/CSS/JavaScript，无外部依赖、网络请求、iframe、eval。HTML有body，引用style.css和script.js；使用addEventListener，禁止内联事件。数据仅在内存保存，不用localStorage和cookie，制作美观且可交互的页面。
+   如果用户要求可在浏览器直接体验的前端页面，默认输出index.html、style.css、script.js（可附README.md）。只用原生HTML/CSS/JavaScript，无外部依赖、网络请求、iframe。禁止eval和Function构造器（含new Function）；计算器须用普通函数实现解析与运算。HTML有body，引用style.css和script.js；使用addEventListener，禁止内联事件。数据仅在内存保存，不用localStorage和cookie，制作美观且可交互的页面。
    当前需求明确切换技术栈时，移除旧版不相关文件；否则修改时保留原有功能与未改动文件。后端代码只用于源码导出，不会在工作台执行。
    """, "需求："+prompt+"\n计划："+plan+"\n当前文件："+json.writeValueAsString(current)+"\n上次校验错误："+failure,selectedModel);
   output=output.trim(); if(output.startsWith("```")) output=output.replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
