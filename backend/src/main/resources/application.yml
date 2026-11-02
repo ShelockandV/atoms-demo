@@ -1,0 +1,47 @@
+server:
+  address: 127.0.0.1
+  port: 8080
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        same-site: strict
+        secure: false
+      timeout: 7d
+spring:
+  config:
+    import:
+      - optional:file:./config/application-private.yml
+      - optional:file:./backend/config/application-private.yml
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/atoms?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC
+    username: atoms
+    password: ""
+  sql:
+    init:
+      mode: always
+  jackson:
+    time-zone: UTC
+  servlet:
+    multipart:
+      max-request-size: 1MB
+atoms:
+  demo: false
+  model:
+    base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api-key: ""
+    name: qwen-plus
+    # 逗号分隔的模型白名单，前端按模式显示；已有 name 继续作为构建默认模型
+    # 单次文本模型请求的等待上限；多文件工程通常比普通问答耗时更长
+    timeout-seconds: 1800
+    max-output-tokens: 16000
+    build-models: qwen-plus,qwen3-coder-plus,qwen3-coder-flash
+    chat-default: qwen-plus
+    chat-models: qwen-plus,qwen-flash
+    image:
+      # 留空时从文本地址推导同地域的阿里云原生接口，密钥复用 atoms.model.api-key
+      endpoint: ""
+      api-key: ""
+      default-model: qwen-image-2.0
+      models: qwen-image-2.0,qwen-image-2.0-pro
+      size: 1024*1024

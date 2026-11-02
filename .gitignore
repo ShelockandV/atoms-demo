@@ -1,0 +1,19 @@
+node_modules/
+dist/
+target/
+.env
+backend/data/
+*.log
+.DS_Store
+*.tsbuildinfo
+
+# Backend-owned local/deployment credentials; never publish.
+backend/config/application-private.yml
+backend/config/application-production.yml
+backend/config/spring.datasource.password
+backend/config/mysql-root-password
+deploy/caddy-data/
+deploy/caddy-config/
+backend/src/main/resources/static/
+.idea/
+*.iml

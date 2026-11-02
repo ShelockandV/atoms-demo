@@ -1,0 +1,8 @@
+# For HTTPS replace :80 with your domain, e.g. atoms.example.com.
+:80 {
+    encode gzip
+    reverse_proxy app:8080 {
+        # Flush SSE immediately; model jobs can take several minutes.
+        flush_interval -1
+    }
+}
