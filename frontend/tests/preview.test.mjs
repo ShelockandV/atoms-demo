@@ -49,3 +49,25 @@ test('inline HTML works and unsupported resources report actionable errors', asy
   assert.throws(()=>previewDocument({'index.html':'<script type="module" src="src/main.ts"></script>'}, 't'), /需要构建/)
   assert.throws(()=>previewDocument({'index.html':'<script src="https://example.com/app.js"></script>'}, 't'), /不支持外部资源/)
 })
+
+test('sandboxed generated apps can use isolated in-memory browser storage', async () => {
+  const { JSDOM, VirtualConsole } = await import('jsdom')
+  globalThis.DOMParser = new JSDOM('').window.DOMParser
+  const { previewDocument } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+  const html = previewDocument({'index.html': `<body><div id="board"></div><script>
+    localStorage.setItem('best', '4'); sessionStorage.setItem('tab', '2048');
+    document.querySelector('#board').textContent = localStorage.getItem('best') + ':' + sessionStorage.getItem('tab');
+    localStorage.score = 8;
+    document.body.dataset.property = localStorage.getItem('score');
+  </script></body>`}, 'storage-test')
+  const errors = []
+  const console = new VirtualConsole(); console.on('jsdomError', e => errors.push(e.message))
+  const runtime = new JSDOM(html, {runScripts:'dangerously', virtualConsole:console})
+  assert.deepEqual(errors, [])
+  assert.equal(runtime.window.document.querySelector('#board').textContent, '4:2048')
+  assert.equal(runtime.window.document.body.dataset.property, '8')
+  runtime.window.close()
+  const fresh = new JSDOM(previewDocument({'index.html':'<body></body>'}, 'fresh'), {runScripts:'dangerously'})
+  assert.equal(fresh.window.localStorage.length, 0)
+  fresh.window.close()
+})

@@ -59,7 +59,26 @@ export function previewDocument(files: Files, token: string) {
   const csp = doc.createElement('meta'); csp.httpEquiv = 'Content-Security-Policy'
   csp.content = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'"
   doc.head.prepend(csp)
-  const bridge = doc.createElement('script'); bridge.textContent = `window.addEventListener('error', e => parent.postMessage({type:'preview-error',token:${JSON.stringify(token)},message:e.message},'*'));window.addEventListener('unhandledrejection',e=>parent.postMessage({type:'preview-error',token:${JSON.stringify(token)},message:String(e.reason)},'*'));`
+  // Opaque sandbox origins cannot access native Web Storage. Keep generated apps
+  // compatible without granting same-origin access or persisting data across runs.
+  const storageBridge = `(() => {
+    for (const name of ['localStorage', 'sessionStorage']) {
+      const data = Object.create(null);
+      const methods = {
+        getItem(key) { key = String(key); return Object.hasOwn(data, key) ? data[key] : null; },
+        setItem(key, value) { data[String(key)] = String(value); },
+        removeItem(key) { delete data[String(key)]; },
+        clear() { for (const key of Object.keys(data)) delete data[key]; },
+        key(index) { return Object.keys(data)[Number(index) >>> 0] ?? null; }
+      };
+      const storage = new Proxy(data, {
+        get(target, key) { return key === 'length' ? Object.keys(data).length : Object.hasOwn(methods, key) ? methods[key] : target[key]; },
+        set(target, key, value) { target[key] = String(value); return true; }
+      });
+      Object.defineProperty(window, name, { value: storage, configurable: true });
+    }
+  })();`
+  const bridge = doc.createElement('script'); bridge.textContent = storageBridge + `window.addEventListener('error', e => parent.postMessage({type:'preview-error',token:${JSON.stringify(token)},message:e.message},'*'));window.addEventListener('unhandledrejection',e=>parent.postMessage({type:'preview-error',token:${JSON.stringify(token)},message:String(e.reason)},'*'));`
   doc.head.append(bridge)
   for (const script of scripts) doc.body.append(script)
   for (const style of Array.from(doc.querySelectorAll('style'))) style.textContent = (style.textContent || '').replace(/<\/style/gi, '<\\/style')
