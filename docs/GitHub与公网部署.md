@@ -80,6 +80,30 @@ docker compose -f deploy/compose.yml up -d --force-recreate gateway
 
 ## 4. 更新与备份
 
+### 当前阿里云演示服务器
+
+项目目录为 `/opt/atoms-demo`，公网入口为 `http://115.29.18.229`。在阿里云 Workbench 的 Shell 模式中执行维护命令：
+
+```bash
+cd /opt/atoms-demo
+docker compose -f deploy/compose.yml ps
+docker compose -f deploy/compose.yml logs --tail=100 app
+curl --fail http://127.0.0.1/api/health
+```
+
+服务器首次使用 GitHub 源码压缩包部署，未安装 Git。更新时可以下载源码后覆盖公共文件，私有配置不会包含在压缩包中：
+
+```bash
+curl --fail --location https://codeload.github.com/ShelockandV/atoms-demo/tar.gz/refs/heads/main --output /tmp/atoms-demo.tar.gz
+tar -xzf /tmp/atoms-demo.tar.gz -C /opt/atoms-demo --strip-components=1
+cd /opt/atoms-demo
+docker compose -f deploy/compose.yml up -d --build
+```
+
+安全组放行 TCP 80，数据库不映射到公网。容器设置了自动重启和数据库持久化卷，网站运行不依赖本机电脑在线。
+
+### 使用 Git 更新的服务器
+
 ```bash
 git pull --ff-only
 docker compose -f deploy/compose.yml up -d --build
@@ -92,6 +116,8 @@ MySQL数据保存在命名卷中。停止服务使用 `docker compose -f deploy/
 `.github/workflows/build.yml` 会在推送main或PR时构建前端，并将其放入Spring Boot静态资源目录后打成JAR；构建产物名为 `atoms-application`。该工作流不包含服务器SSH凭证，也不会自行部署到未知服务器。CI构建成功不代表已经有公网运行地址。
 
 如不使用Docker，可下载Actions中的JAR，准备外部MySQL与私有配置，再运行：
+
+也可直接下载 [v0.1.0-demo 完整部署包](https://github.com/ShelockandV/atoms-demo/releases/tag/v0.1.0-demo)，其中已包含前端资源，不包含私有模型配置。
 
 ```bash
 java -jar atoms-backend-0.1.0.jar --spring.config.additional-location=file:/你的配置目录/
