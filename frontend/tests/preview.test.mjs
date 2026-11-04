@@ -5,6 +5,23 @@ import ts from 'typescript'
 const source = readFileSync(new URL('../src/preview.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText.replace("from 'acorn'", `from '${new URL('../node_modules/acorn/dist/acorn.mjs', import.meta.url).href}'`)
 const { canPreview } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+test('saved inline calculator handlers update the display and calculate', async () => {
+  const { JSDOM } = await import('jsdom')
+  globalThis.DOMParser = new JSDOM('').window.DOMParser
+  const { previewDocument } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+  const html = previewDocument({
+    'calculator/index.html': `<body><div id="display">0</div><button onclick="inputNumber('7')">7</button><button onclick="inputOperator('+')">+</button><button onclick="calculate()">=</button><script src="script.js"></script></body>`,
+    'calculator/script.js': `let input='0', previous=0; function inputNumber(n){input=input==='0'?n:input+n;document.getElementById('display').textContent=input;} function inputOperator(){previous=Number(input);input='0';} function calculate(){input=String(previous+Number(input));document.getElementById('display').textContent=input;}`
+  }, 'inline-calculator')
+  const runtime = new JSDOM(html, {runScripts:'dangerously'})
+  const buttons=runtime.window.document.querySelectorAll('button')
+  assert.equal(buttons[0].hasAttribute('onclick'), false)
+  buttons[0].click()
+  assert.equal(runtime.window.document.getElementById('display').textContent, '7')
+  buttons[1].click(); buttons[0].click(); buttons[2].click()
+  assert.equal(runtime.window.document.getElementById('display').textContent, '14')
+  runtime.window.close()
+})
 test('previews static frontend with custom file names and supporting files', () => {
   assert.equal(canPreview({'index.html':'<body><script src="app.js"></script></body>', 'app.js':'', 'styles.css':'', 'package.json':'{}'}), true)
 })
@@ -21,7 +38,7 @@ test('assembles local resources and executes generated interaction', async () =>
   globalThis.DOMParser = new JSDOM('').window.DOMParser
   const { previewDocument } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
   const html = previewDocument({
-    'web/index.html': '<html><head><link rel="stylesheet" href="./assets/main.css"></head><body><button id="count" onclick="throw 1">0</button><script src="assets/main.js"></script><script>document.body.dataset.ready="yes"</script></body></html>',
+    'web/index.html': '<html><head><link rel="stylesheet" href="./assets/main.css"></head><body><button id="count" onclick="this.dataset.clicked=event.type">0</button><script src="assets/main.js"></script><script>document.body.dataset.ready="yes"</script></body></html>',
     'web/assets/main.css': 'button { color: red; }',
     'web/assets/main.js': 'document.querySelector("button").addEventListener("click",e=>e.target.textContent="1")',
     'README.md': 'Example'
@@ -31,6 +48,7 @@ test('assembles local resources and executes generated interaction', async () =>
   assert.equal(button.hasAttribute('onclick'), false)
   button.click()
   assert.equal(button.textContent, '1')
+  assert.equal(button.dataset.clicked, 'click')
   assert.equal(runtime.window.document.body.dataset.ready, 'yes')
   assert.match(runtime.window.document.querySelector('style').textContent, /color: red/)
   assert.match(runtime.window.document.querySelector('meta').content, /connect-src 'none'/)

@@ -26,7 +26,23 @@ export function previewDocument(files: Files, token: string) {
   const doc = new DOMParser().parseFromString(files[entry], 'text/html')
   const used = new Set<string>()
   doc.querySelectorAll('base,meta,iframe,object,embed').forEach(e => e.remove())
-  doc.querySelectorAll('*').forEach(e => { for (const a of Array.from(e.attributes)) if (/^on/i.test(a.name) || a.name === 'srcdoc') e.removeAttribute(a.name) })
+  // Saved generations may use inline handlers despite the generation prompt.
+  // Compile them into ordinary listeners inside the existing isolated sandbox.
+  // This uses static script text, never eval or Function construction.
+  const handlers: string[] = []
+  const elements = Array.from(doc.querySelectorAll('*'))
+  elements.forEach(element => element.removeAttribute('data-atoms-event-target'))
+  elements.forEach((element, index) => {
+    for (const attribute of Array.from(element.attributes)) {
+      if (/^on/i.test(attribute.name)) {
+        const handler = `function(event){${attribute.value}\n}`
+        parse(`(${handler})`, { ecmaVersion: 'latest', sourceType: 'script' })
+        element.setAttribute('data-atoms-event-target', String(index))
+        handlers.push(`elements.get(${index})?.addEventListener(${JSON.stringify(attribute.name.slice(2))}, function(event){ if ((${handler}).call(this,event) === false) event.preventDefault(); });`)
+        element.removeAttribute(attribute.name)
+      } else if (attribute.name === 'srcdoc') element.removeAttribute(attribute.name)
+    }
+  })
   for (const link of Array.from(doc.querySelectorAll('link'))) {
     if (link.rel === 'stylesheet') {
       const path = resolve(link.getAttribute('href') || '')
@@ -80,6 +96,11 @@ export function previewDocument(files: Files, token: string) {
   })();`
   const bridge = doc.createElement('script'); bridge.textContent = storageBridge + `window.addEventListener('error', e => parent.postMessage({type:'preview-error',token:${JSON.stringify(token)},message:e.message},'*'));window.addEventListener('unhandledrejection',e=>parent.postMessage({type:'preview-error',token:${JSON.stringify(token)},message:String(e.reason)},'*'));`
   doc.head.append(bridge)
+  if (handlers.length) {
+    const listeners = doc.createElement('script')
+    listeners.textContent = `(() => {const elements=new Map(Array.from(document.querySelectorAll('[data-atoms-event-target]'),element=>{const index=Number(element.getAttribute('data-atoms-event-target'));element.removeAttribute('data-atoms-event-target');return [index,element];}));${handlers.join('\n')}\n})();`
+    doc.body.append(listeners)
+  }
   for (const script of scripts) doc.body.append(script)
   for (const style of Array.from(doc.querySelectorAll('style'))) style.textContent = (style.textContent || '').replace(/<\/style/gi, '<\\/style')
   for (const script of Array.from(doc.scripts)) script.textContent = (script.textContent || '').replace(/<\/script/gi, '<\\/script')
