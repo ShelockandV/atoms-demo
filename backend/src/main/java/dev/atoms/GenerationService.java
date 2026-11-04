@@ -65,7 +65,9 @@ public class GenerationService {
       files=model.generate(prompt,plan,context,failure,selectedModel);
       store.checkpoint(rid,owner,token,files,failure,attempt);
      }
-     store.stage(rid,owner,token,"VALIDATING");validate(files);break;
+     store.stage(rid,owner,token,"VALIDATING");validate(files);
+     if(!context.files().isEmpty() && files.equals(context.files()))throw new IllegalArgumentException("模型返回的源码与当前版本完全相同，尚未落实本次修改需求。请根据本次需求实际修改相关文件，不能原样复制旧源码");
+     break;
     } catch(IllegalArgumentException e) {
      failure=e.getMessage();files=null;attempt++;
      store.checkpoint(rid,owner,token,null,failure,attempt);

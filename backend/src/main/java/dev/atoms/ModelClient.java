@@ -75,7 +75,7 @@ public class ModelClient {
   var messages=new ArrayList<Map<String,String>>();
   messages.add(Map.of("role","system","content",system+"\n你正在同一项目中连续协作。结合项目历史理解指代、需求和已讨论的问题；本轮明确要求优先。当前源码是本轮修改的唯一基准，可能来自手动编辑或历史版本恢复，不要用历史描述覆盖它。修复问题时保留无关功能、样式和文件，除非用户明确要求替换。"));
   messages.addAll(context.history());
-  String content="项目名称："+context.title()+"\n当前基准版本："+Objects.requireNonNullElse(context.baseVersion(),"尚无源码版本")+"\n当前源码（完整快照）："+json.writeValueAsString(context.files())+"\n"+details+"\n本次需求："+prompt;
+  String content="本次需求（本轮唯一执行目标）："+prompt+"\n项目名称："+context.title()+"\n当前基准版本："+Objects.requireNonNullElse(context.baseVersion(),"尚无源码版本")+"\n当前源码（待修改的输入资料，不是要求原样返回的答案）：\n"+json.writeValueAsString(context.files())+"\n"+details+"\n请落实以上本次需求；历史记录用于理解背景，不得用旧需求替代本轮要求。";
   messages.add(Map.of("role","user","content",content));
   return completion(messages,selectedModel);
  }
@@ -95,6 +95,7 @@ public class ModelClient {
    如果用户要求Java/Spring Boot等后端，生成pom.xml、src/main/java/...源文件、配置文件和README.md启动说明。其他后端语言也按其实际工程结构输出。不要附带无关的静态三文件模板。使用占位配置，不生成真实密钥。
    如果用户要求可在浏览器直接体验的前端页面，默认输出index.html、style.css、script.js（可附README.md）。只用原生HTML/CSS/JavaScript，无外部依赖、网络请求、iframe。禁止eval和Function构造器（含new Function）；计算器须用普通函数实现解析与运算。HTML有body，引用style.css和script.js；使用addEventListener，禁止内联事件。数据仅在内存保存，不用localStorage和cookie，制作美观且可交互的页面。
    当前需求明确切换技术栈时，移除旧版不相关文件；否则修改时保留原有功能与未改动文件。后端代码只用于源码导出，不会在工作台执行。
+   对已有项目的修改必须实际落实本轮要求：先在内部逐条核对本次反馈，再修改相关源码。不能原样复制当前版本、只改注释或空白来冒充修复。用户要求新增按钮时，按钮必须在正常使用状态可见且绑定实际行为；修复布局时同时核对CSS布局与JavaScript坐标计算。输出前自行检查要求是否落实。
    """, prompt,context,"本轮计划："+plan+"\n本轮上次校验错误："+failure,selectedModel);
   output=output.trim(); if(output.startsWith("```")) output=output.replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
   com.fasterxml.jackson.databind.JsonNode node;

@@ -125,6 +125,33 @@ class ProjectMemoryTest {
   assertTrue(store.context(pid,owner,null,"next").history().isEmpty());
  }
 
+ @Test void unchangedRepairRetriesWithFeedbackInsteadOfSavingDuplicateVersion()throws Exception {
+  String pid=create("2048");String original=html("缺少新游戏按钮");
+  answerBuild(original);execute(pid,"创建2048","build");String base=current(pid);
+  model.answers.add("添加始终可见的新游戏按钮");
+  model.answers.add(json.writeValueAsString(Map.of("index.html",original)));
+  String changed=html("<button>新游戏</button>");
+  model.answers.add(json.writeValueAsString(Map.of("index.html",changed)));
+  String rid=execute(pid,"添加新游戏按钮","build");
+  assertEquals("SUCCEEDED",store.run(rid,owner).get("status"));
+  assertEquals(2,store.versions(pid).size());
+  assertNotEquals(base,current(pid));
+  assertEquals(changed,store.versionFiles(current(pid)).get("index.html"));
+  assertTrue(latestInput().contains("源码与当前版本完全相同"));
+ }
+
+ @Test void repeatedlyUnchangedRepairFailsWithoutCreatingVersion()throws Exception {
+  String pid=create("2048");String original=html("缺少新游戏按钮");
+  answerBuild(original);execute(pid,"创建2048","build");String base=current(pid);
+  model.answers.add("添加按钮");
+  for(int i=0;i<2;i++)model.answers.add(json.writeValueAsString(Map.of("index.html",original)));
+  String rid=execute(pid,"添加新游戏按钮","build");
+  assertEquals("FAILED",store.run(rid,owner).get("status"));
+  assertEquals(base,current(pid));
+  assertEquals(1,store.versions(pid).size());
+  assertTrue(((String)store.run(rid,owner).get("error")).contains("源码与当前版本完全相同"));
+ }
+
  static class RecordingModel extends ModelClient {
   final List<List<Map<String,String>>> calls=new ArrayList<>();
   final Deque<String> answers=new ArrayDeque<>();
