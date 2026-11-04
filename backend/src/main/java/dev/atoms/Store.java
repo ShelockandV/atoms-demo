@@ -17,8 +17,9 @@ public class Store {
  final ObjectMapper json;
  Store(JdbcTemplate db, TransactionTemplate tx, ObjectMapper json) { this.db=db; this.tx=tx; this.json=json; }
  void recoverJobs() {
-  db.update("UPDATE generation_runs SET status='FAILED',error='服务重启中断了任务，请重试' WHERE status NOT IN ('SUCCEEDED','FAILED')");
-  db.update("UPDATE projects SET active_run=NULL WHERE active_run IS NOT NULL");
+  db.update("UPDATE generation_runs SET status='PAUSED',error=NULL WHERE status NOT IN ('SUCCEEDED','FAILED','PAUSED')");
+  db.update("UPDATE run_checkpoints SET execution_token=NULL");
+  db.update("UPDATE projects SET active_run=NULL WHERE active_run IS NOT NULL AND active_run NOT IN (SELECT id FROM generation_runs WHERE status='PAUSED')");
  }
  static String id() { return UUID.randomUUID().toString(); }
  static String now() { return Instant.now().toString(); }
@@ -76,16 +77,21 @@ public class Store {
    if(db.update("UPDATE projects SET active_run=?,updated_at=? WHERE id=? AND active_run IS NULL",rid,now(),pid)!=1) throw error(409,"项目已有任务正在执行");
    db.update("INSERT INTO generation_runs(id,project_id,status,base_version,prompt,created_at) VALUES(?,?,'QUEUED',?,?,?)",rid,pid,base,prompt,now());
    db.update("INSERT INTO run_options VALUES(?,?,?)",rid,mode,model);
+   db.update("INSERT INTO run_checkpoints(run_id,attempt) VALUES(?,0)",rid);
    richMessage(pid,"user",prompt,rid,mode,model,null);return run(rid,owner);
   });
  }
  void stage(String id,String status) {db.update("UPDATE generation_runs SET status=? WHERE id=?",status,id);}
  void plan(String id,String plan) {db.update("UPDATE generation_runs SET plan=? WHERE id=?",plan,id);}
  Map<String,Object> save(String pid,String owner,String base,Map<String,String> files,String summary,String runId) {
+  return save(pid,owner,base,files,summary,runId,null);
+ }
+ Map<String,Object> save(String pid,String owner,String base,Map<String,String> files,String summary,String runId,String token) {
   return tx.execute(status -> {
    // Serialize edits/restores/generation commits on the project row.
    db.queryForList("SELECT id FROM projects WHERE id=? FOR UPDATE",pid);
    var p=project(pid,owner);
+   if(token!=null)requireExecution(runId,token);
    if(!Objects.equals(base,p.get("current_version"))) throw error(409,"当前版本已变化，请刷新后重试");
    if(!Objects.equals(runId,p.get("active_run"))) throw error(409,"生成中暂不能保存或恢复版本");
    int number=db.queryForObject("SELECT COALESCE(MAX(version_number),0)+1 FROM project_versions WHERE project_id=?",Integer.class,pid);
@@ -101,14 +107,105 @@ public class Store {
   String mid=id();db.update("INSERT INTO messages VALUES(?,?,?,?,?)",mid,pid,role,content,now());
   db.update("INSERT INTO message_details VALUES(?,?,?,?,?)",mid,rid,mode,model,assetId);
  }
- List<Map<String,String>> chatHistory(String pid) {
-  var rows=db.queryForList("SELECT m.role,m.content FROM messages m JOIN message_details d ON d.message_id=m.id JOIN generation_runs r ON r.id=d.run_id WHERE m.project_id=? AND d.mode='chat' AND r.status='SUCCEEDED' ORDER BY m.created_at DESC,m.id DESC LIMIT 20",pid);
-  Collections.reverse(rows);var history=new ArrayList<Map<String,String>>();int size=0;
-  for(int i=rows.size()-1;i>=0;i--){var m=rows.get(i);String content=(String)m.get("content");if(size+content.length()>24000)break;size+=content.length();history.addFirst(Map.of("role",(String)m.get("role"),"content",content));}return history;
+ ProjectContext context(String pid,String owner,String base,String currentRun) {
+  var p=project(pid,owner);
+  if(base!=null)requireVersion(pid,base);
+  // Fetch complete turns so timestamp ties never reverse user/assistant order.
+  var turns=db.queryForList("SELECT r.id,r.status,r.prompt,r.error,COALESCE(o.mode,'build') AS mode FROM generation_runs r LEFT JOIN run_options o ON o.run_id=r.id WHERE r.project_id=? AND r.id<>? AND r.status IN ('SUCCEEDED','FAILED') AND COALESCE(o.mode,'build') IN ('build','chat') ORDER BY r.created_at DESC,r.id DESC LIMIT 20",pid,currentRun);
+  Collections.reverse(turns);
+  var first=db.queryForList("SELECT r.id,r.status,r.prompt,r.error,COALESCE(o.mode,'build') AS mode FROM generation_runs r LEFT JOIN run_options o ON o.run_id=r.id WHERE r.project_id=? AND r.id<>? AND r.status IN ('SUCCEEDED','FAILED') AND COALESCE(o.mode,'build') IN ('build','chat') ORDER BY r.created_at,r.id LIMIT 1",pid,currentRun);
+  if(!first.isEmpty() && turns.stream().noneMatch(t->t.get("id").equals(first.getFirst().get("id"))))turns.addFirst(first.getFirst());
+  var history=new ArrayList<Map<String,String>>();
+  for(var turn:turns) {
+   history.add(Map.of("role","user","content",(String)turn.get("prompt")));
+   if("FAILED".equals(turn.get("status"))) {
+    history.add(Map.of("role","assistant","content","此请求未完成，源码未更新。失败原因："+Objects.requireNonNullElse(turn.get("error"),"未知错误")));
+   } else {
+    var replies=db.queryForList("SELECT m.content FROM messages m JOIN message_details d ON d.message_id=m.id WHERE d.run_id=? AND m.project_id=? AND m.role='assistant' ORDER BY m.created_at,m.id",turn.get("id"),pid);
+    for(var reply:replies)history.add(Map.of("role","assistant","content",(String)reply.get("content")));
+   }
+  }
+  return new ProjectContext((String)p.get("title"),base,boundedHistory(history),versionFiles(base));
+ }
+ static List<Map<String,String>> boundedHistory(List<Map<String,String>> history) {
+  // Retain the initial brief as well as the latest changes, with a fixed budget.
+  if(history.isEmpty())return List.of();
+  final int budget=24000, perMessage=6000, maxMessages=40;
+  var result=new ArrayList<Map<String,String>>();
+  var first=history.getFirst();String brief=clipHistory(first.get("content"),perMessage);
+  result.add(Map.of("role",first.get("role"),"content",brief));
+  int remaining=budget-brief.length()-200;
+  var recent=new ArrayList<Map<String,String>>();
+  for(int i=history.size()-1;i>0 && recent.size()<maxMessages-1;i--) {
+   var message=history.get(i);String content=clipHistory(message.get("content"),perMessage);
+   if(content.length()>remaining)break;
+   recent.addFirst(Map.of("role",message.get("role"),"content",content));remaining-=content.length();
+  }
+  if(recent.size()+1<history.size())result.add(Map.of("role","assistant","content","部分较早的项目对话已因长度限制省略；请以当前源码和本次需求为准。"));
+  result.addAll(recent);return result;
+ }
+ static String clipHistory(String content,int limit) {
+  String note="\n[此条较长，已截断]";
+  return content.length()<=limit?content:content.substring(0,limit-note.length())+note;
+ }
+ static class StaleExecution extends RuntimeException {}
+ Map<String,Object> lockRun(String rid,String owner) {
+  var view=run(rid,owner);String pid=(String)view.get("projectId");
+  db.queryForList("SELECT id FROM projects WHERE id=? FOR UPDATE",pid);
+  return db.queryForMap("SELECT * FROM generation_runs WHERE id=?",rid);
+ }
+ void requireExecution(String rid,String token) {
+  var tokens=db.queryForList("SELECT c.execution_token,r.status FROM run_checkpoints c JOIN generation_runs r ON r.id=c.run_id WHERE c.run_id=?",rid);
+  if(tokens.isEmpty() || !Objects.equals(token,tokens.getFirst().get("execution_token")) || Set.of("PAUSED","SUCCEEDED","FAILED").contains(tokens.getFirst().get("status")))throw new StaleExecution();
+ }
+ String claim(String rid,String owner) {
+  return tx.execute(status->{
+   var r=lockRun(rid,owner);
+   if(!"QUEUED".equals(r.get("status")))throw new StaleExecution();
+   var rows=db.queryForList("SELECT execution_token FROM run_checkpoints WHERE run_id=?",rid);
+   if(rows.isEmpty())db.update("INSERT INTO run_checkpoints(run_id,attempt) VALUES(?,0)",rid);
+   else if(rows.getFirst().get("execution_token")!=null)throw new StaleExecution();
+   String token=id();db.update("UPDATE run_checkpoints SET execution_token=? WHERE run_id=?",token,rid);return token;
+  });
+ }
+ String pause(String rid,String owner) {return pause(rid,owner,null);}
+ String pause(String rid,String owner,String expectedToken) {
+  return tx.execute(status->{
+   var r=lockRun(rid,owner);
+   if(expectedToken!=null)requireExecution(rid,expectedToken);
+   if(Set.of("SUCCEEDED","FAILED").contains(r.get("status")))throw error(409,"任务已结束，不能暂停");
+   var rows=db.queryForList("SELECT execution_token FROM run_checkpoints WHERE run_id=?",rid);
+   String token=rows.isEmpty()?null:(String)rows.getFirst().get("execution_token");
+   db.update("UPDATE run_checkpoints SET execution_token=NULL WHERE run_id=?",rid);
+   db.update("UPDATE generation_runs SET status='PAUSED',error=NULL WHERE id=?",rid);return token;
+  });
+ }
+ Map<String,Object> resume(String rid,String owner) {
+  return tx.execute(status->{
+   var r=lockRun(rid,owner);String pid=(String)r.get("project_id");
+   if(!"PAUSED".equals(r.get("status")))throw error(409,"只有已暂停的任务可以恢复");
+   var p=project(pid,owner);
+   if(!Objects.equals(p.get("active_run"),rid) || !Objects.equals(p.get("current_version"),r.get("base_version")))throw error(409,"项目版本已变化，无法恢复此任务");
+   db.update("UPDATE generation_runs SET status='QUEUED',error=NULL WHERE id=?",rid);return r;
+  });
+ }
+ Map<String,Object> checkpoint(String rid) {return db.queryForMap("SELECT * FROM run_checkpoints WHERE run_id=?",rid);}
+ void stage(String rid,String owner,String token,String stage) {
+  tx.executeWithoutResult(s->{lockRun(rid,owner);requireExecution(rid,token);stage(rid,stage);});
+ }
+ void plan(String rid,String owner,String token,String plan) {
+  tx.executeWithoutResult(s->{lockRun(rid,owner);requireExecution(rid,token);plan(rid,plan);});
+ }
+ void checkpoint(String rid,String owner,String token,Map<String,String> files,String failure,int attempt) {
+  tx.executeWithoutResult(s->{lockRun(rid,owner);requireExecution(rid,token);db.update("UPDATE run_checkpoints SET files=?,failure=?,attempt=? WHERE run_id=?",files==null?null:encode(files),failure,attempt,rid);});
  }
  void finishReply(String rid,String pid,String content,String mode,String model,byte[] image,String mediaType,String prompt) {
+  finishReply(rid,pid,content,mode,model,image,mediaType,prompt,null);
+ }
+ void finishReply(String rid,String pid,String content,String mode,String model,byte[] image,String mediaType,String prompt,String token) {
   tx.executeWithoutResult(status -> {
    var rows=db.queryForList("SELECT active_run FROM projects WHERE id=? FOR UPDATE",pid);
+   if(token!=null)requireExecution(rid,token);
    if(rows.isEmpty()||!Objects.equals(rows.getFirst().get("active_run"),rid))throw error(409,"任务已失效");
    String asset=null;if(image!=null){asset=id();db.update("INSERT INTO image_assets VALUES(?,?,?,?,?,?,?)",asset,pid,prompt,model,mediaType,image,now());}
    richMessage(pid,"assistant",content,rid,mode,model,asset);stage(rid,"SUCCEEDED");
@@ -119,7 +216,11 @@ public class Store {
   var rows=db.queryForList("SELECT a.media_type,a.image_data FROM image_assets a JOIN projects p ON p.id=a.project_id WHERE a.id=? AND p.owner_id=?",id,owner);
   if(rows.isEmpty())throw error(404,"图片不存在");return rows.getFirst();
  }
- void fail(String rid,String pid,String message) {
-  tx.executeWithoutResult(s -> {db.update("UPDATE generation_runs SET status='FAILED',error=? WHERE id=?",message,rid);db.update("UPDATE projects SET active_run=NULL WHERE id=? AND active_run=?",pid,rid);richMessage(pid,"assistant","任务未完成："+message+"。已有版本未被覆盖。",rid,runMode(rid),runModel(rid),null);});
+ void fail(String rid,String pid,String message) {fail(rid,pid,message,null);}
+ void fail(String rid,String pid,String message,String token) {
+  tx.executeWithoutResult(s -> {
+   db.queryForList("SELECT id FROM projects WHERE id=? FOR UPDATE",pid);
+   if(token!=null){try{requireExecution(rid,token);}catch(StaleExecution e){return;}}
+   db.update("UPDATE generation_runs SET status='FAILED',error=? WHERE id=?",message,rid);db.update("UPDATE projects SET active_run=NULL WHERE id=? AND active_run=?",pid,rid);richMessage(pid,"assistant","任务未完成："+message+"。已有版本未被覆盖。",rid,runMode(rid),runModel(rid),null);});
  }
 }

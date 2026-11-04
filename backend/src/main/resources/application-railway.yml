@@ -21,7 +21,7 @@ atoms:
   model:
     base-url: ${MODEL_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
     api-key: ${MODEL_API_KEY:}
-    name: ${MODEL_NAME:qwen-plus}
+    name: ${MODEL_NAME:qwen3-coder-flash}
     timeout-seconds: ${MODEL_TIMEOUT_SECONDS:300}
     max-output-tokens: ${MODEL_MAX_OUTPUT_TOKENS:16000}
     image:

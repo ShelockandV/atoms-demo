@@ -71,24 +71,31 @@ public class ModelClient {
    default -> "模型服务返回 HTTP " + status + "，请检查供应商服务状态及配置";
   };
  }
- String chat(String prompt,List<Map<String,String>> history,String selectedModel) throws Exception {
-  if(demo)return "【演示回答】已收到你的问题："+prompt+"。当前为离线演示；配置真实模型后可进行多轮问答。对话不会修改应用代码或创建版本。";
-  var messages=new ArrayList<Map<String,String>>();messages.add(Map.of("role","system","content","你是友好的中文助手。根据上下文直接回答问题，可以讨论需求、解释知识与提供建议。不要默认生成完整应用文件。"));messages.addAll(history);messages.add(Map.of("role","user","content",prompt));
+ String projectCall(String system,String prompt,ProjectContext context,String details,String selectedModel) throws Exception {
+  var messages=new ArrayList<Map<String,String>>();
+  messages.add(Map.of("role","system","content",system+"\n你正在同一项目中连续协作。结合项目历史理解指代、需求和已讨论的问题；本轮明确要求优先。当前源码是本轮修改的唯一基准，可能来自手动编辑或历史版本恢复，不要用历史描述覆盖它。修复问题时保留无关功能、样式和文件，除非用户明确要求替换。"));
+  messages.addAll(context.history());
+  String content="项目名称："+context.title()+"\n当前基准版本："+Objects.requireNonNullElse(context.baseVersion(),"尚无源码版本")+"\n当前源码（完整快照）："+json.writeValueAsString(context.files())+"\n"+details+"\n本次需求："+prompt;
+  messages.add(Map.of("role","user","content",content));
   return completion(messages,selectedModel);
  }
- String plan(String prompt,String selectedModel) throws Exception {
-  return demo?"演示模式：使用内置模板展示流程；支持记账、任务看板、落地页及Java后端示例。任意自然语言修改需要配置真实模型。":call("你是一位软件工程师。先判断用户要求的是前端页面还是后端工程，遵循明确指定的语言与框架。前端预览运行在隔离iframe中，计划不得使用eval、Function构造器、localStorage或cookie；计算器使用普通函数实现运算。用中文简述技术栈、源码目录、核心能力和实现步骤，最多250字。后端工程应包含构建配置与启动说明。",prompt,selectedModel);
+ String chat(String prompt,ProjectContext context,String selectedModel) throws Exception {
+  if(demo)return "【演示回答】已收到你的问题："+prompt+"。当前为离线演示；配置真实模型后可进行多轮问答。对话不会修改应用代码或创建版本。";
+  return projectCall("你是友好的中文助手。根据项目上下文直接回答问题，可以讨论需求、解释当前代码和提供建议。对话模式只回答，不修改源码；需要实际修复时提醒用户切换构建模式继续提出修改。",prompt,context,"",selectedModel);
  }
- Map<String,String> generate(String prompt,String plan,Map<String,String> current,String failure,String selectedModel) throws Exception {
-  if(demo) return DemoTemplates.create(prompt,current);
-  String output=call("""
+ String plan(String prompt,ProjectContext context,String selectedModel) throws Exception {
+  return demo?"演示模式：使用内置模板展示流程；支持记账、任务看板、落地页及Java后端示例。任意自然语言修改需要配置真实模型。":projectCall("你是一位软件工程师。先判断用户要求的是前端页面还是后端工程，遵循明确指定的语言与框架。前端预览运行在隔离iframe中，计划不得使用eval、Function构造器、localStorage或cookie；计算器使用普通函数实现运算。用中文简述技术栈、源码目录、核心能力和实现步骤，最多250字。后端工程应包含构建配置与启动说明。",prompt,context,"",selectedModel);
+ }
+ Map<String,String> generate(String prompt,String plan,ProjectContext context,String failure,String selectedModel) throws Exception {
+  if(demo) return DemoTemplates.create(prompt,context.files());
+  String output=projectCall("""
    你是专业软件工程师。严格根据用户要求的语言和技术栈生成真实工程源码。
    只输出一个JSON对象：每个键是文件相对路径，每个值是该文件完整文本内容。不要包装files字段，不要Markdown围栏，不要把源码嵌入HTML展示，不要省略为伪代码或省略号。
    最多80个文件，总量小于1MB。使用正斜杠目录，禁止绝对路径及..。返回完整版本快照，不是补丁。
    如果用户要求Java/Spring Boot等后端，生成pom.xml、src/main/java/...源文件、配置文件和README.md启动说明。其他后端语言也按其实际工程结构输出。不要附带无关的静态三文件模板。使用占位配置，不生成真实密钥。
    如果用户要求可在浏览器直接体验的前端页面，默认输出index.html、style.css、script.js（可附README.md）。只用原生HTML/CSS/JavaScript，无外部依赖、网络请求、iframe。禁止eval和Function构造器（含new Function）；计算器须用普通函数实现解析与运算。HTML有body，引用style.css和script.js；使用addEventListener，禁止内联事件。数据仅在内存保存，不用localStorage和cookie，制作美观且可交互的页面。
    当前需求明确切换技术栈时，移除旧版不相关文件；否则修改时保留原有功能与未改动文件。后端代码只用于源码导出，不会在工作台执行。
-   """, "需求："+prompt+"\n计划："+plan+"\n当前文件："+json.writeValueAsString(current)+"\n上次校验错误："+failure,selectedModel);
+   """, prompt,context,"本轮计划："+plan+"\n本轮上次校验错误："+failure,selectedModel);
   output=output.trim(); if(output.startsWith("```")) output=output.replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
   com.fasterxml.jackson.databind.JsonNode node;
   try{node=json.readTree(output);}catch(com.fasterxml.jackson.core.JsonProcessingException e){throw new IllegalArgumentException("模型未返回合法的源码文件JSON，请按文件路径与完整内容重新输出");}

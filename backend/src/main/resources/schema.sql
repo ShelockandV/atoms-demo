@@ -32,3 +32,9 @@ CREATE TABLE IF NOT EXISTS image_assets (
  model VARCHAR(100) NOT NULL, media_type VARCHAR(40) NOT NULL, image_data MEDIUMBLOB NOT NULL,
  created_at VARCHAR(40) NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id)
 );
+
+CREATE TABLE IF NOT EXISTS run_checkpoints (
+ run_id VARCHAR(36) PRIMARY KEY, execution_token VARCHAR(36),
+ files MEDIUMTEXT, failure MEDIUMTEXT, attempt INT NOT NULL DEFAULT 0,
+ FOREIGN KEY(run_id) REFERENCES generation_runs(id)
+);

@@ -16,32 +16,70 @@ public class GenerationService {
  @PostConstruct void recover() {
   store.recoverJobs();
  }
+ final ConcurrentMap<String,FutureTask<Void>> workers=new ConcurrentHashMap<>();
  @PreDestroy void stop(){executor.shutdownNow();}
  void submit(String rid,String pid,String owner,String prompt,String base,String mode,String selectedModel) {
-  try{executor.execute(() -> execute(rid,pid,owner,prompt,base,mode,selectedModel));}catch(RejectedExecutionException e){store.fail(rid,pid,"任务队列已满，请稍后重试");}
+  final String token;
+  try{token=store.claim(rid,owner);}catch(Store.StaleExecution e){return;}
+  var task=new FutureTask<Void>(()->{execute(rid,pid,owner,prompt,base,mode,selectedModel,token);return null;}) {
+   @Override protected void done(){workers.remove(token);executor.remove(this);}
+  };
+  workers.put(token,task);
+  try{executor.execute(task);}catch(RejectedExecutionException e){workers.remove(token);store.fail(rid,pid,"任务队列已满，请稍后重试",token);}
  }
- void execute(String rid,String pid,String owner,String prompt,String base,String mode,String selectedModel){
+ Map<String,Object> pause(String rid,String owner) {
+  String token=store.pause(rid,owner);
+  if(token!=null){var task=workers.get(token);if(task!=null)task.cancel(true);}
+  return store.run(rid,owner);
+ }
+ Map<String,Object> resume(String rid,String owner) {
+  var r=store.resume(rid,owner);String pid=(String)r.get("project_id");
+  submit(rid,pid,owner,(String)r.get("prompt"),(String)r.get("base_version"),store.runMode(rid),store.runModel(rid));
+  return store.run(rid,owner);
+ }
+ void execute(String rid,String pid,String owner,String prompt,String base,String mode,String selectedModel) {
+  try{execute(rid,pid,owner,prompt,base,mode,selectedModel,store.claim(rid,owner));}catch(Store.StaleExecution ignored){}
+ }
+ void execute(String rid,String pid,String owner,String prompt,String base,String mode,String selectedModel,String token){
   try {
+   store.requireExecution(rid,token);
+   var context="image".equals(mode)?null:store.context(pid,owner,base,rid);
    if("chat".equals(mode)) {
-    store.stage(rid,"ANSWERING");String reply=model.chat(prompt,store.chatHistory(pid),selectedModel);
-    store.finishReply(rid,pid,reply,mode,selectedModel,null,null,prompt);return;
+    store.stage(rid,owner,token,"ANSWERING");String reply=model.chat(prompt,context,selectedModel);
+    store.finishReply(rid,pid,reply,mode,selectedModel,null,null,prompt,token);return;
    }
    if("image".equals(mode)) {
-    store.stage(rid,"IMAGING");var result=images.generate(prompt,selectedModel);
-    store.finishReply(rid,pid,model.demo?"【演示图片】此图为本地示例，不代表真实模型生成。":"图片已生成并保存，可预览或下载原图。",mode,selectedModel,result.bytes(),result.mediaType(),prompt);return;
+    store.stage(rid,owner,token,"IMAGING");var result=images.generate(prompt,selectedModel);
+    store.finishReply(rid,pid,model.demo?"【演示图片】此图为本地示例，不代表真实模型生成。":"图片已生成并保存，可预览或下载原图。",mode,selectedModel,result.bytes(),result.mediaType(),prompt,token);return;
    }
-   store.stage(rid,"PLANNING");String plan=model.plan(prompt,selectedModel);store.plan(rid,plan);
-   var current=store.versionFiles(base);Map<String,String> files=null;String failure="";
-   for(int attempt=0;attempt<2;attempt++) {
-    store.stage(rid,attempt==0?"GENERATING":"REPAIRING");
-    try {files=model.generate(prompt,plan,current,failure,selectedModel);store.stage(rid,"VALIDATING");validate(files);break;}
-    catch(IllegalArgumentException e){failure=e.getMessage();if(attempt==1)throw e;}
+   String plan=(String)store.run(rid,owner).get("plan");
+   if(plan==null){store.stage(rid,owner,token,"PLANNING");plan=model.plan(prompt,context,selectedModel);store.plan(rid,owner,token,plan);}
+   var checkpoint=store.checkpoint(rid);
+   Map<String,String> files=checkpoint.get("files")==null?null:store.files((String)checkpoint.get("files"));
+   String failure=(String)Objects.requireNonNullElse(checkpoint.get("failure"),"");int attempt=((Number)checkpoint.get("attempt")).intValue();
+   if(attempt>=2)throw new IllegalArgumentException(failure);
+   while(attempt<2) {
+    try {
+     if(files==null) {
+      store.stage(rid,owner,token,attempt==0?"GENERATING":"REPAIRING");
+      files=model.generate(prompt,plan,context,failure,selectedModel);
+      store.checkpoint(rid,owner,token,files,failure,attempt);
+     }
+     store.stage(rid,owner,token,"VALIDATING");validate(files);break;
+    } catch(IllegalArgumentException e) {
+     failure=e.getMessage();files=null;attempt++;
+     store.checkpoint(rid,owner,token,null,failure,attempt);
+     if(attempt>=2)throw e;
+    }
    }
-   store.save(pid,owner,base,files,model.demo?"演示源码已保存。静态页面可预览，后端工程请导出后在本地运行；任意需求修改请接入真实模型。":"已生成并保存 "+files.size()+" 个源码文件。"+(SourceFiles.canPreview(files)?"请在右侧预览并手动验收交互。":"请在代码面板查看文件，导出后在本地编译运行；工作台不会执行后端代码。"),rid);
+   store.save(pid,owner,base,files,model.demo?"演示源码已保存。静态页面可预览，后端工程请导出后在本地运行；任意需求修改请接入真实模型。":"已生成并保存 "+files.size()+" 个源码文件。"+(SourceFiles.canPreview(files)?"请在右侧预览并手动验收交互。":"请在代码面板查看文件，导出后在本地编译运行；工作台不会执行后端代码。"),rid,token);
+  } catch(Store.StaleExecution ignored) {
+   // A pause/resume invalidates this execution, even if a provider returns late.
   } catch(Exception e){
+   if(executor.isShutdown()){try{store.pause(rid,owner,token);}catch(Store.StaleExecution ignored){}return;}
    log.warn("Generation task failed: runId={}, mode={}, model={}, exception={}",rid,mode,selectedModel,e.getClass().getName());
    String message="image".equals(mode)&&e instanceof java.net.http.HttpTimeoutException?"图像生成或下载请求超时，请稍后重试":describeFailure(e,model.timeoutSeconds);
-   store.fail(rid,pid,message==null?"生成失败":message);
+   store.fail(rid,pid,message==null?"生成失败":message,token);
   }
  }
  static String describeFailure(Exception error,int timeoutSeconds) {

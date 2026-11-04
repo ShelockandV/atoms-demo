@@ -30,7 +30,7 @@ atoms:
   model:
     base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api-key: ""
-    name: qwen-plus
+    name: qwen3-coder-flash
     # 逗号分隔的模型白名单，前端按模式显示；已有 name 继续作为构建默认模型
     # 单次文本模型请求的等待上限；多文件工程通常比普通问答耗时更长
     timeout-seconds: 1800

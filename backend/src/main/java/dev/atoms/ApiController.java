@@ -43,6 +43,8 @@ public class ApiController {
    generation.submit((String)run.get("id"),id,owner,input.prompt(),input.baseVersion(),mode,selectedModel);return run;
   }
  }
+ @PostMapping("/runs/{id}/pause") Object pause(@PathVariable String id,HttpSession s){return generation.pause(id,owner(s));}
+ @PostMapping("/runs/{id}/resume") Object resume(@PathVariable String id,HttpSession s){return generation.resume(id,owner(s));}
  @GetMapping("/runs/{id}") Object status(@PathVariable String id,HttpSession s){return store.run(id,owner(s));}
  @GetMapping(value="/runs/{id}/events",produces=MediaType.TEXT_EVENT_STREAM_VALUE) SseEmitter events(@PathVariable String id,HttpSession s){
   String owner=owner(s);store.run(id,owner);var emitter=new SseEmitter(180000L);var done=new AtomicBoolean(false);
@@ -50,7 +52,7 @@ public class ApiController {
   final java.util.concurrent.ScheduledFuture<?>[] future=new java.util.concurrent.ScheduledFuture<?>[1];
   future[0]=scheduler.scheduleAtFixedRate(()->{
    if(done.get()){if(future[0]!=null)future[0].cancel(false);return;}
-   try{var run=store.run(id,owner);emitter.send(SseEmitter.event().name("status").data(run));if(Set.of("SUCCEEDED","FAILED").contains(run.get("status"))){done.set(true);emitter.complete();}}
+   try{var run=store.run(id,owner);emitter.send(SseEmitter.event().name("status").data(run));if(Set.of("SUCCEEDED","FAILED","PAUSED").contains(run.get("status"))){done.set(true);emitter.complete();}}
    catch(Exception e){done.set(true);emitter.completeWithError(e);}
   },Duration.ofSeconds(1));return emitter;
  }

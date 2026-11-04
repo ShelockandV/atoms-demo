@@ -25,12 +25,13 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm test
           npm run build
       - name: Package frontend with backend
         run: |
           mkdir -p backend/src/main/resources/static
           cp -R frontend/dist/. backend/src/main/resources/static/
-          mvn -B -f backend/pom.xml -DskipTests package
+          mvn -B -f backend/pom.xml package
       - uses: actions/upload-artifact@v7
         with:
           name: atoms-application
