@@ -1,0 +1,9 @@
+ARG MAVEN_IMAGE=maven:3.9-eclipse-temurin-21
+FROM ${MAVEN_IMAGE}
+COPY --chown=65532:65532 backend/pom.xml /opt/atoms-warmup/pom.xml
+RUN --mount=type=cache,id=atoms-acceptance-maven,target=/root/.m2/repository \
+    mkdir -p /opt/atoms-warmup/src/test/java \
+    && printf '%s\n' 'class WarmupTest { @org.junit.jupiter.api.Test void warm() {} }' > /opt/atoms-warmup/src/test/java/WarmupTest.java \
+    && mvn -B -ntp -f /opt/atoms-warmup/pom.xml test \
+    && cp -R /root/.m2/repository /opt/atoms-repository \
+    && chmod -R a+rX /opt/atoms-repository

@@ -61,7 +61,10 @@ mvn spring-boot:run
 - 构建、普通问答、文生图三模式；按模式选择并记住模型。
 - 多轮对话上下文、生成图片持久化与下载、模型与模式历史记录。
 - 匿名浏览器空间、项目列表和搜索，刷新后恢复当前项目。
-- 需求 → 计划 → 生成 → 静态校验 → 最多一次格式或语法修复。
+- 需求 → 计划 → ReAct 动作循环：查看文件、读取源码、生成或修复、静态校验、需求复核、保存。默认最多12步、2次源码生成、20次文本模型调用。
+- 持久化执行记录、工具观察与候选源码检查点；支持暂停、服务重启后恢复，以及模型调用次数和供应商返回的 token 用量记录。
+- 三种构建执行方式：自主执行（ReAct）、复核修复（Reflection）、分解开发（DAG）。DAG 并行分析需求与架构，完成后汇总开发约束；节点结果可独立恢复。
+- 结构化工具元数据、参数 schema、注册目录及统一执行器；工具参数、权限范围、超时由 Java 执行路径检查。工具目录可通过 `/api/agent/tools` 查询。
 - 有界任务线程池，每个项目同时只允许一个任务；每会话每小时最多20次生成。
 - SSE 推送状态，轮询兜底；断线不自动重复提交。
 - 前端静态应用预览，以及Java等后端工程的多文件源码查看、编辑、保存与导出。
@@ -69,7 +72,7 @@ mvn spring-boot:run
 - 不可变版本、查看历史、恢复为新版本、ZIP 源码导出。
 - 乐观版本检查、短事务提交，失败不会覆盖已有版本。
 - iframe sandbox、受限 CSP、来源窗口及预览标识校验、运行错误展示。
-- 服务重启后把中断任务标为失败；匿名访问 Cookie 保留时可再次读取已保存项目。
+- 服务重启后把中断任务暂停；恢复时复用已完成的计划与动作结果，重试尚未完成的动作。
 
 ## 手动验收
 
@@ -85,12 +88,13 @@ mvn spring-boot:run
 
 ## 构建
 
-按需求不包含单元测试。
+后端包含项目记忆、暂停恢复、Agent 动作与调用预算测试；前端包含输入和预览测试。
 
 ```bash
 cd frontend
 npm run build
 cd ../backend
+mvn test
 mvn -DskipTests package
 ```
 
@@ -107,17 +111,108 @@ frontend/src/atoms-theme.css     Dashboard 主题与组件样式
 frontend/src/api.ts              API与数据类型
 frontend/src/preview.ts          预览组装、语法检查与错误桥接
 backend/src/main/java/dev/atoms/
-  ApiController.java            项目、任务、版本、SSE与导出
-  Store.java                    JDBC持久化与事务
-  GenerationService.java        状态机、校验与修复
-  ModelClient.java              文本生成与多轮问答接口
-  ModelCatalog.java             按模式管理模型白名单与默认项
-  ImageClient.java               阿里云同步文生图与结果下载
-  DemoTemplates.java            离线演示模板
-  RequestGuard.java             同源写入检查与匿名访问Cookie
+  AtomsApplication.java         Spring Boot 入口
+  web/                          HTTP 接口、健康检查与请求防护
+  agent/                        任务编排、工具执行、模型调用与任务持久化
+    GenerationService.java      任务调度、暂停与恢复
+    AgentLoop.java              执行循环与检查点
+    pattern/                   ReAct、Reflection、DAG 策略与节点调度
+    tool/                      工具目录、参数协议、执行器与内置工具
+    model/                     模型客户端、响应解析与 HTTP 通信
+    persistence/               任务事务、检查点、步骤、DAG 节点与模型用量
+  workspace/                    项目快照、记录查询、源码校验、ZIP 导出与离线模板
 backend/src/main/resources/      数据库schema与环境配置
 backend/compose.yml             可选的本地MySQL容器
 ```
+
+Shannon 模式的 Java 迁移范围、配置、执行流程及后续路线见 [Agent模式迁移](docs/Agent模式迁移.md)。当前使用 Java 实现，不依赖 Python、Go、Rust 或 Temporal 服务。
+
+### Agent Skills
+
+在后端私有配置中设置 `atoms.agent.skills-directory` 指向本地技能目录。技能使用 Shannon 的 Markdown 与 YAML frontmatter 格式，例如：
+
+```markdown
+---
+name: review
+version: 1.0.0
+category: development
+description: 按验收条件复核实现
+requires_tools:
+  - READ_FILE
+budget_max: 5000
+---
+逐项检查本轮验收条件，并说明每项检查所依据的文件。
+```
+
+启动时加载技能。用 `GET /api/skills?category=development` 查看目录，用 `GET /api/skills/review@1.0.0` 查看指定版本。调用 `POST /api/projects/{id}/runs` 时可加上 `"skill": "review@1.0.0"`，或用 `"skill": "review"` 选择最新启用版本。任务提交后固定技能版本和正文，暂停恢复时继续使用同一份配置。
+
+声明了 `requires_tools` 的技能使用构建模式与 ReAct，工具名须与 Atoms 注册表一致。正文作为现有系统提示的一部分，`requires_role` 提供角色提示。`budget_max` 与全局 token 预算均为正数时取较小值。当前 API 对标记为 `dangerous` 的技能返回 403。
+
+### Workflow Templates
+
+在后端私有配置中设置 `atoms.agent.workflow-templates-directory`。应用启动时加载目录中的 YAML，例如：
+
+```yaml
+name: project_review
+description: 分析需求并汇总验收条件
+version: 1.0.0
+nodes:
+  - id: requirements
+    type: simple
+    metadata:
+      query: 列出本轮需求和要保留的现有功能
+  - id: summary
+    type: simple
+    depends_on: [requirements]
+    metadata:
+      query: 根据依赖输出汇总实施步骤和验收条件
+```
+
+用 `GET /api/workflow-templates` 查看模板。在 `POST /api/projects/{id}/runs` 请求中设置 `"mode": "build", "template": "project_review"` 来执行模板。节点也可以通过顶层 `edges` 声明依赖，每条边包含 `from` 和 `to`。节点输出按任务保存供暂停恢复，完成后用于 Reflection 构建。模板最多 20 个分析节点，并发上限为 2。
+
+通过 `extends: [project_review@1.0.0]` 继承指定版本，也可仅使用模板名。按声明顺序合并父模板，最后叠加子模板。同 ID 节点按字段覆盖，非空的 `depends_on` 或顶层 `edges` 替换继承所得列表。任务保存展开后的模板，恢复时可直接使用。
+
+- `defaults.budget_agent_max` 给出默认节点预算，节点可用 `budget_max` 覆盖。值为 0 时仅使用任务级预算。节点与任务预算在同一事务预留并结算。分析请求将输出上限限制在节点预算的三分之一以内，输入预留沿用任务级估算。
+- `on_fail.retry` 为暂时性网络故障和可重试的供应商响应增加 0～5 次尝试。尝试次数按次执行计算，模型用量和预留跨暂停恢复保留。
+- `type: dag` 可在 `metadata.tasks` 中配置分析子任务。子任务用 `id`、`query` 和 `depends_on` 表达依赖，可用 `role` 指定分析视角。子任务共享父节点预算，结果各自保存，父节点按声明顺序合并输出。
+- DAG 与 Supervisor 节点可用 `metadata.execution` 选择 `sequential`（按声明顺序传递上一步结果）、`parallel`（独立子任务并发）或 `hybrid`（按依赖调度并发）。`parallel` 和 `hybrid` 默认并发为 2，可用 `metadata.max_concurrency` 设置为 1～4。旧模板仍按原有的单并发规则执行。
+
+- `type: cognitive` 搭配 `strategy: reflection` 会按初稿、复核、修订三个阶段运行，每个阶段都可恢复。显式预算低于 3000 token 时使用单轮分析，其余预算仍按节点共享。
+
+- `strategy: debate` 使用三个项目视角，先给出立场，再经三轮回应和一次汇总。各阶段可恢复。预算低于 6000 token 时采用 Reflection，低于 3000 token 时采用单轮分析。辩论阶段使用较小的单次输出上限。
+- `strategy: chain_of_thought` 输出按需求、约束、步骤和验收组织的方案。预算低于 4000 token 时使用普通单轮分析。
+
+- `strategy: tree_of_thoughts` 按得分优先探索方案，深度最多 3，每次最多 3 个分支，总计最多 15 个，低于 0.3 的分支会剪除。每次扩展由同一次模型调用生成并评分，扩展结果和最终汇总均有检查点。预算低于 8000 token 时切换到 Chain of Thought。
+- `on_fail.degrade_to` 支持认知节点在网络故障或可重试的供应商故障耗尽尝试后切换到 `react`、`reflection` 或 `chain_of_thought`。策略切换会保存，恢复后继续使用降级策略。
+
+- `type: supervisor` 将目标动态拆成最多四个分析任务，按依赖执行后汇总。拆解、子任务和汇总各有检查点，使用同一节点预算。当前子任务只执行项目分析。
+
+- 节点可通过 `tools_allowlist: [LIST_FILES, READ_FILE]` 启用工作区查阅。模型可以选择白名单中的一个操作或跳过。工具观察写入检查点，并提供给该节点的分析与子任务。白名单覆盖节点的查阅阶段。后续 Reflection 构建仍使用自己的执行策略。
+
+- 认知节点支持 `on_fail.escalate_to: supervisor`。暂时性故障耗尽可用重试及降级后，任务会保存升级记录，再进入 Supervisor 分析流程，沿用同一个节点预算。
+
+- `defaults.require_approval: true` 让任务在执行前进入 `AWAITING_APPROVAL`。可在工作台批准或拒绝，也可通过 `POST /api/runs/{id}/approval?approved=true` 或 `approved=false` 操作。审批通过后才开始模型调用，审批沿用项目会话权限。
+- 工作台的「执行方式」可选择已配置的工作流模板。API 提交时可用 `template` 和 `templateVersion` 指定模板和版本，或直接使用目录返回的模板 ID。请求的模板未匹配时走常规执行策略。设置 `requireTemplate: true` 要求匹配，否则返回 400。兼容 Shannon 字段名 `template_name`、`template_version` 和 `disable_ai`，其中 `disable_ai` 对应模板必选，模板中的分析节点仍可调用模型。
+
+设置 `atoms.agent.learning-router-enabled: true` 后，工作台可选择「自动选择」，API 可提交 `pattern: "auto"`。Java 路由器从当前项目最多 50 条同类型构建结果中查找相似需求，按成功率选执行策略。没有合适记录时使用 ReAct。路由使用本地字符相似度和数据库历史，无需调用模型。
+
+项目记忆在近期对话之外，还会根据当前需求召回最多三条同项目的早期成功记录。当前检索使用最近 100 条成功记录中的字符相似度，召回内容作为参考资料随当前请求传给模型。
+
+### Shannon Gateway 会话
+
+`POST /api/v1/tasks` 可设置 `mode: "auto"` 使用项目内学习路由。匹配到显式模板时优先执行模板。DAG 和 Supervisor 模板可用 `metadata.role_tools` 为子任务角色分配只读工具。角色权限须来自节点的 `tools_allowlist`，未配置的角色没有工具权限。
+
+`POST /api/v1/tasks` 接受 JSON 对象 `context`，它随任务保存并作为模型的参考资料。会话历史返回任务结果、用量、费用、时间和上下文元数据。通过 `PATCH /api/v1/sessions/{id}` 更新标题，通过 `DELETE /api/v1/sessions/{id}` 软删除会话。会话有活动任务时返回 409。
+
+通过 `atoms.gateway.tenant-tokens.<tenant>` 配置各租户的独立 Bearer 令牌。至少配置一个令牌后，所有 `/api/v1/` 接口均要求有效的 `Authorization: Bearer ...`。每个租户令牌对应一个 Gateway 身份。未配置令牌时沿用访客会话模式。
+
+### 运行指标
+
+可用 `atoms.model.rates[模型ID].input` 和 `atoms.model.rates[模型ID].output` 配置输入与输出每百万 token 的美元费率。结算使用实际应答模型的费率，并将金额写入数据库。`atoms_model_estimated_cost_usd_total` 汇总配置费率后产生的估算费用，费率调整只影响后续结算。
+
+设置 `atoms.metrics.enabled: true` 和 `atoms.metrics.token` 后，Prometheus 可以使用 Bearer 凭据抓取 `/metrics`。指标包含提交任务总数、各状态当前任务数、模型调用次数、供应商报告的输入和输出 token，以及已记录的 Agent 步骤耗时。指标从数据库汇总，应用重启后仍保留。模型调用计数包含已预留但可能失败的调用，token 指标使用供应商返回的实际用量。
+
+Supervisor 的独立子工作流、角色工具执行及单独的审批人角色尚未接入。
 
 ## 当前边界
 

@@ -1,0 +1,5 @@
+FROM mcr.microsoft.com/playwright:v1.51.1-noble
+WORKDIR /opt/atoms
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/* \
+    && npm install --ignore-scripts --no-audit --no-fund playwright@1.51.1
+COPY deploy/acceptance/browser.cjs /opt/atoms/browser.cjs
