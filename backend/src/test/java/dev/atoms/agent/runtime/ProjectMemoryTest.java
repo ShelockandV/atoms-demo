@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
 
 import dev.atoms.agent.pattern.ExecutionPattern;
 import dev.atoms.agent.pattern.PatternRegistry;
@@ -37,19 +37,14 @@ class ProjectMemoryTest {
     DriverManagerDataSource source;
  RecordingModel model;
  GenerationService generation;
- java.sql.Connection databaseLifetime;
 
  @BeforeEach void setup() {
-  source=new DriverManagerDataSource("jdbc:h2:file:"+directory.resolve("memory")+";MODE=MySQL;DATABASE_TO_LOWER=TRUE","sa","");
-  // Keep the database open across statements, as the application's connection pool does.
-  // https://h2database.github.io/html/performance.html (sentinel connection)
-  try {databaseLifetime=source.getConnection();}catch(java.sql.SQLException e){throw new IllegalStateException(e);}
+  source=dev.atoms.MySqlTestDatabase.create();
   new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
   store=new Store(new JdbcTemplate(source),new TransactionTemplate(new DataSourceTransactionManager(source)),json);
   model=new RecordingModel(json);
   generation=new GenerationService(store,model,mock(ImageClient.class));
  }
- @AfterEach void cleanup()throws Exception {generation.stop();databaseLifetime.close();}
  String create(String title){return (String)store.create(owner,title).get("id");}
  String current(String pid){return (String)store.project(pid,owner).get("current_version");}
  String execute(String pid,String prompt,String mode) {
@@ -96,8 +91,6 @@ class ProjectMemoryTest {
   assertTrue(latestInput().contains(original));
   // New service/store instances use only persisted project data.
   generation.stop();
-  databaseLifetime.close();
-  databaseLifetime=source.getConnection();
   store=new Store(new JdbcTemplate(source),new TransactionTemplate(new DataSourceTransactionManager(source)),json);
   generation=new GenerationService(store,model,mock(ImageClient.class));
   String fixed=html("绿色主题；加法正确：a+b；两位小数");
@@ -263,7 +256,7 @@ class ProjectMemoryTest {
   assertEquals("REFERENCE", plain.getFirst().origin());
  }
 
- @Test void researchRejectsCitationsThatDoNotExist() {
+ @Test void researchFallsBackWhenCitationsDoNotExist() {
   String pid = create("Research citations");
   String version = (String) store.save(pid, owner, null, Map.of("notes.md", "合同交付条款：两个工作日"),
           "save", null).get("id");
@@ -271,8 +264,11 @@ class ProjectMemoryTest {
   model.answers.add("这一结论有来源 [S9]");
   String run = execute(pid, "找一下合同交付条款", "research");
   var result = store.run(run, owner);
-  assertEquals("FAILED", result.get("status"));
-  assertTrue(result.get("error").toString().contains("引用了未提供的证据"));
+  assertEquals("SUCCEEDED", result.get("status"));
+  String report = store.dagNodes(run).stream()
+          .filter(node -> "research.report".equals(node.get("id"))).findFirst().orElseThrow().get("output").toString();
+  assertTrue(report.contains("综合报告暂不可用"));
+  assertFalse(report.contains("[S9]"));
   assertEquals(version, store.project(pid, owner).get("current_version"));
   assertTrue(model.calls.getLast().getLast().get("content").contains("两个工作日"));
  }
@@ -452,6 +448,11 @@ class ProjectMemoryTest {
            input.hasFiles(), input.validated(), input.reviewed(), input.observations()));
    return new ModelClient.Decision(choice.action(), choice.path(), choice.summary(), choice.arguments());
   }
+  @Override public com.fasterxml.jackson.databind.JsonNode completeMessage(
+          List<Map<String, String>> messages, String selectedModel, Map<String, Object> options) {
+   return json().createObjectNode().put("content", completion(messages, selectedModel));
+  }
+
   @Override public String completion(List<Map<String,String>> messages,String selectedModel) {
    calls.add(List.copyOf(messages));
    if(answers.isEmpty())throw new AssertionError("Unexpected model request");

@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.approval;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.atoms.agent.pattern.WorkflowTemplate;
@@ -27,7 +27,7 @@ public final class TaskApprovalPolicy {
     private final ObjectMapper json;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
-    TaskApprovalPolicy(ObjectMapper json, @Value("${atoms.approval.opa-url:}") String url,
+    public TaskApprovalPolicy(ObjectMapper json, @Value("${atoms.approval.opa-url:}") String url,
                        @Value("${atoms.approval.environment:dev}") String environment,
                        @Value("${atoms.agent.token-budget:0}") long tokenBudget,
                        @Value("${atoms.approval.tool-opa-url:}") String toolUrl,
@@ -51,21 +51,21 @@ public final class TaskApprovalPolicy {
         return endpoint;
     }
 
-    String toolRequirement(String owner, String run, int step, String tool) {
+    public String toolRequirement(String owner, String run, int step, String tool) {
         String reason = toolEndpoint == null ? null : evaluate(toolEndpoint, Map.of(
                 "environment", environment, "user_id", owner, "workflow_id", run, "step", step,
                 "tool", tool, "tools_to_use", java.util.List.of(tool)));
         return reason != null ? reason : approvalTools.contains(tool) ? "此工具需要人工审批：" + tool : null;
     }
 
-    String nodeToolRequirement(String owner, String run, String node, String tool) {
+    public String nodeToolRequirement(String owner, String run, String node, String tool) {
         String reason = toolEndpoint == null ? null : evaluate(toolEndpoint, Map.of(
                 "environment", environment, "user_id", owner, "workflow_id", run, "node", node,
                 "tool", tool, "tools_to_use", java.util.List.of(tool)));
         return reason != null ? reason : approvalTools.contains(tool) ? "此节点工具需要人工审批：" + tool : null;
     }
 
-    boolean evaluatesTool(String name) { return toolEndpoint != null || approvalTools.contains(name); }
+    public boolean evaluatesTool(String name) { return toolEndpoint != null || approvalTools.contains(name); }
 
     public String requirement(String owner, String query, String mode, String model, String pattern,
                        Skill skill, WorkflowTemplate template) {

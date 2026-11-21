@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
 
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.persistence.Store;
@@ -84,7 +84,15 @@ final class ToolInvocation implements ToolContext {
         store.stage(rid, owner, token, stage);
     }
 
-    public Map<String, String> workspace() { return files.isEmpty() ? project.files() : files; }
+    public Map<String, String> workspace() {
+        var workspace = new java.util.TreeMap<>(files.isEmpty() ? project.files() : files);
+        workspace.putAll(store.workspaceArtifactsForRun(rid, owner));
+        return workspace;
+    }
+
+    public void writeWorkspaceFile(String path, String content) {
+        store.writeWorkspaceFile(rid, owner, token, path, content);
+    }
 
     ToolResult execute(ToolExecutor<? super ToolInvocation> executor, AgentLoop.Decision decision) throws Exception {
         return executor.execute(decision.action(), decision.arguments(), this, model.json(), owner, this::checkActive,

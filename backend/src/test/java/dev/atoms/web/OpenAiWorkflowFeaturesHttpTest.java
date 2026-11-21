@@ -23,14 +23,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "atoms.demo=false", "atoms.model.api-key=local-workflow-fixture",
-        "spring.datasource.url=jdbc:h2:mem:workflow_model_features;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-        "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
-        "spring.datasource.password=", "spring.sql.init.mode=always"
+        "atoms.model.api-key=local-workflow-fixture",
+        "spring.sql.init.mode=always"
 })
-class OpenAiWorkflowFeaturesHttpTest {
+class OpenAiWorkflowFeaturesHttpTest extends dev.atoms.MySqlTestDatabase {
     @LocalServerPort int port;
     @Autowired ObjectMapper json;
+    @Autowired dev.atoms.agent.persistence.Store store;
     private static HttpServer provider;
     private static final List<com.fasterxml.jackson.databind.JsonNode> REQUESTS = new CopyOnWriteArrayList<>();
     private static final java.util.concurrent.atomic.AtomicInteger CANDIDATES = new java.util.concurrent.atomic.AtomicInteger();
@@ -48,6 +47,7 @@ class OpenAiWorkflowFeaturesHttpTest {
                 String last = messages.get(messages.size() - 1).path("content").asText();
                 var message = mapper.createObjectNode().put("role", "assistant");
                 String finish = "stop";
+                int outputTokens = 5;
                 if (system.contains("依据工作流草稿") && !"tool".equals(messages.get(messages.size() - 1).path("role").asText())) {
                     message.putNull("content");
                     message.putArray("tool_calls").addObject().put("id", "call_workflow").put("type", "function")
@@ -55,6 +55,16 @@ class OpenAiWorkflowFeaturesHttpTest {
                     finish = "tool_calls";
                 } else if (last.contains("把用户问题拆成")) {
                     message.put("content", "[{\"id\":\"summary\",\"query\":\"summarize\",\"depends_on\":[]}]");
+                } else if (system.contains("你是研究问题规划者")) {
+                    message.put("content", "[\"采购约定\"]");
+                } else if (system.contains("你是资料研究员") && last.contains("从上次停止的位置继续")) {
+                    message.put("content", "验收通过后办理付款 [S1]。");
+                } else if (system.contains("你是资料研究员") && last.contains("回退测试")) {
+                    message.put("content", "错误引用 [S999]。");
+                } else if (system.contains("你是资料研究员")) {
+                    message.put("content", "货物到达后验收 [S1]");
+                    finish = "length";
+                    outputTokens = request.path("max_tokens").asInt();
                 } else if (last.contains("candidate demo")) {
                     message.put("content", "choice-" + CANDIDATES.incrementAndGet());
                 } else if (system.contains("依据工作流草稿")) {
@@ -64,7 +74,7 @@ class OpenAiWorkflowFeaturesHttpTest {
                 }
                 var body = mapper.writeValueAsBytes(Map.of("choices", List.of(Map.of(
                         "message", message, "finish_reason", finish)),
-                        "usage", Map.of("prompt_tokens", 10, "completion_tokens", 5)));
+                        "usage", Map.of("prompt_tokens", 10, "completion_tokens", outputTokens)));
                 exchange.sendResponseHeaders(200, body.length);
                 exchange.getResponseBody().write(body);
             }
@@ -98,6 +108,52 @@ class OpenAiWorkflowFeaturesHttpTest {
                 assertEquals(1, choices.at("/1/index").asInt());
             }
         }
+    }
+
+    @Test void researchContinuesTruncatedReportsAndFallsBackOnInvalidCitations() throws Exception {
+        var cookies = new java.net.CookieManager();
+        try (var http = HttpClient.newBuilder().cookieHandler(cookies).build()) {
+            String base = "http://127.0.0.1:" + port;
+            httpGet(http, base + "/api/config");
+            String owner = cookies.getCookieStore().getCookies().stream()
+                    .filter(cookie -> "ATOMS_VISITOR".equals(cookie.getName())).findFirst().orElseThrow().getValue();
+            String session = (String) store.createGatewaySession(owner).get("id");
+            store.save(session, owner, null, Map.of("guide.md", "采购约定：到货后验收，验收后付款。"), "save", null);
+
+            String continued = research(http, base, session, "采购约定");
+            assertTrue(continued.contains("货物到达后验收 [S1]"), continued);
+            assertTrue(continued.contains("验收通过后办理付款 [S1]。"), continued);
+            assertTrue(continued.contains("[S1] guide.md"), continued);
+            String fallback = research(http, base, session, "采购约定回退测试");
+            assertTrue(fallback.contains("综合报告暂不可用"), fallback);
+            assertTrue(fallback.contains("[S1] guide.md"), fallback);
+            assertFalse(fallback.contains("[S999]"), fallback);
+            assertTrue(REQUESTS.stream().noneMatch(request -> request.has("atoms_synthesis")));
+        }
+    }
+
+    private String research(HttpClient http, String base, String session, String query) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create(base + "/api/v1/tasks")).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of(
+                        "query", query, "session_id", session, "context", Map.of("force_research", true))))).build();
+        var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, response.statusCode(), response.body());
+        String id = json.readTree(response.body()).path("task_id").asText();
+        return assertTimeoutPreemptively(Duration.ofSeconds(12), () -> {
+            while (true) {
+                var result = httpGet(http, base + "/api/v1/tasks/" + id);
+                String status = result.path("status").asText();
+                assertNotEquals("TASK_STATUS_FAILED", status, result.toString());
+                if ("TASK_STATUS_COMPLETED".equals(status)) return result.path("result").asText();
+                Thread.sleep(40);
+            }
+        });
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode httpGet(HttpClient http, String url) throws Exception {
+        var response = http.send(HttpRequest.newBuilder(URI.create(url)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(), response.body());
+        return json.readTree(response.body());
     }
 
     @Test void directChatReturnsDistinctMeteredCandidatesAndForwardsScopedCacheKey() throws Exception {

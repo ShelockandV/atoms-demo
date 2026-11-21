@@ -1,6 +1,6 @@
 package dev.atoms.web;
 
-import dev.atoms.agent.TemporalTaskRuntime;
+import dev.atoms.agent.runtime.TemporalTaskRuntime;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;

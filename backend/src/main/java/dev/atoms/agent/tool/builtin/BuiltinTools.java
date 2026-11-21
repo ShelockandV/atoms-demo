@@ -83,6 +83,15 @@ public final class BuiltinTools {
                             if (content == null) throw new IllegalArgumentException("工作区不存在该文件：" + path);
                             return "文件 " + path + "：\n" + clip(content, 8000);
                         }),
+                tool("WRITE_WORKSPACE_FILE", "将用户要求交付的报告、笔记或其他文本产物保存到会话的 artifacts/ 目录。之后可用 READ_FILE 读取。此工具不更新应用版本。",
+                        "workspace", 30, List.of(
+                            new ToolParameter("path", ToolParameter.Type.STRING, "相对路径，例如 artifacts/report.md", true, 240, List.of()),
+                            new ToolParameter("content", ToolParameter.Type.STRING, "完整文件内容", true, 20000, List.of())),
+                        (c, args) -> {
+                            String path = (String) args.get("path");
+                            c.writeWorkspaceFile(path, (String) args.get("content"));
+                            return "已保存会话文件：" + path;
+                        }),
                 tool("SEARCH_DOCS", "在本轮基准版本的文本与 Markdown 文档中检索片段，返回文件路径及字符范围。",
                         "workspace", 30, List.of(new ToolParameter("query", ToolParameter.Type.STRING, "要查找的短语或关键词",
                                 true, 200, List.of())), (c, args) -> {

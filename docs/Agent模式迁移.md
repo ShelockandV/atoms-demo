@@ -1,6 +1,6 @@
 # Shannon 模式迁移到 Atoms
 
-本次参考本地 Shannon 源码，把应用开发最直接需要的执行模式迁入现有 Java 21 / Spring Boot / JDBC / MySQL（本地演示 H2）项目，前端继续使用 Vue 3。没有复制它的安装脚本、服务部署或供应商配置；参考项目的文档与提示词属于分析资料。
+本次参考本地 Shannon 源码，把应用开发最直接需要的执行模式迁入现有 Java 21 / Spring Boot / JDBC / MySQL项目，前端继续使用 Vue 3。没有复制它的安装脚本、服务部署或供应商配置；参考项目的文档与提示词属于分析资料。
 
 ## 已落地的能力
 
@@ -119,7 +119,7 @@
 | `reflection` / 复核修复 | 生成 → 静态校验 → 需求复核 → 保存；失败反馈驱动重新生成 | 计划、生成、复核；不为选择下一步额外调用模型 |
 | `dag` / 分解开发 | 先执行开发分析图，再按 Reflection 流程开发 | 计划、三个分析节点、生成及复核；不为选择下一步额外调用模型 |
 
-Reflection 和 DAG 在真实模式下始终进行需求复核；`require-review` 控制 ReAct 的完成门槛。离线演示的复核不调用模型，使用明确标注的演示路径。
+Reflection 和 DAG 始终进行需求复核；`require-review` 控制 ReAct 的完成门槛。
 
 DAG 默认使用代码定义的固定图：
 
@@ -131,7 +131,7 @@ DAG 默认使用代码定义的固定图：
 
 前两个节点最多两个并发，汇总只能在两个依赖都成功后启动。`DagExecutor` 支持校验环、缺失依赖和重复节点，通用调度器上限20个节点、4个并发；当前产品模板固定三个节点、两个并发。各节点的依赖、结果、状态和耗时独立保存，恢复时只执行未完成节点。固定节点标识带 `v1.` 前缀，改变节点输入或语义时应变更模板版本，避免复用不兼容输出。
 
-在私有配置设置 `atoms.agent.dynamic-dag: true` 可为真实模型启用动态分析图。模型提出 1～5 个分析节点及依赖，Java 检查参数、未知依赖、重复节点及循环，再以最多两个并发执行，并添加依赖所有分析节点的汇总步骤。模型提出的图和已完成的节点会持久化，恢复时复用。已开始运行的旧固定图继续执行原流程。离线演示使用固定图。
+在私有配置设置 `atoms.agent.dynamic-dag: true` 可为真实模型启用动态分析图。模型提出 1～5 个分析节点及依赖，Java 检查参数、未知依赖、重复节点及循环，再以最多两个并发执行，并添加依赖所有分析节点的汇总步骤。模型提出的图和已完成的节点会持久化，恢复时复用。已开始运行的旧固定图继续执行原流程。
 
 分析节点只返回文本。汇总结果会随生成与修复请求传入模型，源码快照和最终版本仍由同一个开发循环负责。
 
@@ -158,7 +158,7 @@ atoms:
     max-model-calls: 20      # 文本HTTP请求总数，1～200；请求失败也计数
 ```
 
-默认顺利路径通常为：计划 → 选择生成 → 生成 → 选择校验 → 校验 → 选择复核 → 复核 → 选择完成 → 保存。动作选择本身会调用模型，因此费用和延迟会高于原来的两次固定模型调用。离线演示不会产生模型费用。
+默认顺利路径通常为：计划 → 选择生成 → 生成 → 选择校验 → 校验 → 选择复核 → 复核 → 选择完成 → 保存。动作选择本身会调用模型，因此费用和延迟会高于原来的两次固定模型调用。
 
 限额累计值保存在数据库，恢复不清零；配置阈值在执行时读取，修改配置重启后使用新阈值。模型调用上限是调用次数限制，不是严格的 token 预算。token 数来自成功响应中的 `usage.prompt_tokens` / `usage.completion_tokens`，同时展示返回用量的调用数；缺少 usage、失败和失效执行的响应可能没有 token 记录，不能拿它作为供应商账单。
 
@@ -189,7 +189,7 @@ atoms:
 
 已完成的动作不会重复调用模型。暂停时正在进行的动作可能已经在供应商侧执行，恢复时可能重新调用；这是可重试的虚拟源码生成，不承诺外部请求严格执行一次。已经预占的模型调用次数不会退回。旧请求迟到后会被执行令牌拒绝写入。
 
-单实例会从数据库自动调度排队任务，并在启动时重新排队上次中断的任务。手动暂停与待审批状态保留。可选 Temporal 模式为每个任务启动独立 Workflow，由 Activity 执行当前 Agent 逻辑。Temporal 记录调度历史并重试失联的 Activity，业务库检查点负责动作恢复。Research 各阶段和模板角色子任务已拥有独立的 Workflow 和 Activity 历史。模板认知策略的模型步骤也已接入独立 Worker。原生 Temporal 父子关系和版本化重放仍待迁移。完成的 `FINISH` 检查点只代表准备保存，最终是否保存以任务 `SUCCEEDED` 与版本记录为准。
+默认使用 Temporal 从数据库派发待执行任务。手动暂停与待审批状态保留。主调度器为每个服务端执行的任务启动独立 Workflow，由 Activity 执行当前 Agent 逻辑。Temporal 记录调度历史并重试失联的 Activity，业务库检查点负责动作恢复。Research 各阶段和模板角色子任务已拥有独立的 Workflow 和 Activity 历史。模板认知策略的模型步骤也已接入独立 Worker。新任务使用原生 Temporal 父子工作流关系，并通过版本标记兼容旧历史。完成的 `FINISH` 检查点只代表准备保存，最终是否保存以任务 `SUCCEEDED` 与版本记录为准。
 
 ## 动态 DAG 并行修改源码
 
@@ -206,7 +206,7 @@ atoms:
 | 动态开发 DAG、多节点修改源码 | `strategies/dag.go`、`patterns/execution/` | 已支持可选的模型动态分析图与节点恢复；启用 `dynamic-dag-edits` 可按节点并行修改并合并源码 |
 | Swarm、Debate、Tree of Thoughts | `swarm_workflow.go`、`patterns/debate.go`、`tree_of_thoughts.go` | 节点和共享预算完成后增加角色、候选结果、评选及收敛条件；不能简单并发调用模型后覆盖同一源码快照 |
 | Token 预算、模型分层与故障降级 | `middleware_budget.go`、`internal/budget/`、`internal/models/` | 已实现估算预留、实际用量结算、自动选型及跨供应商备用模型。精准 tokenizer 计数和对齐全部供应商协议仍待迁移 |
-| Temporal 长任务可靠性 | `go/orchestrator/internal/workflows/` | 已接入 Temporal Java SDK 和本地 Docker 服务，任务级 Activity 重试通过执行令牌保护持久化写入。节点级 Activity、子工作流及工作流版本升级仍待迁移 |
+| Temporal 长任务可靠性 | `go/orchestrator/internal/workflows/` | 已接入 Temporal Java SDK 和本地 Docker 服务，任务级 Activity 重试通过执行令牌保护持久化写入。Research 和 Agent 节点使用子工作流，并保留历史重放兼容标记 |
 | MCP 和外部工具加载 | `python/llm-service/llm_service/tools/registry.py` | 已支持已批准的只读工具、自动发现、OAuth 客户端凭据、stdio 和旧版 SSE。浏览器授权与副作用工具审批仍待迁移 |
 | 动态工具工厂与出站 SSRF 防护 | `tools/plugin_loader.py`、`tools/openapi_tool.py` | 已实现受控 JSON 公网 GET 工厂和 OpenAPI 只读子集导入，图片下载和工厂工具共用 `PublicHttps`。网络出口隔离、广泛 OpenAPI 兼容、外部 MCP 及其权限仍待迁移 |
 | Skills、可配置流程 | `config/skills/`、`template_workflow.go` | 本地受控配置加载器与可执行工具权限分离；技能文本不能扩大执行权限 |

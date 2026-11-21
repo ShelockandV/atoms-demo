@@ -1,8 +1,8 @@
 package dev.atoms.web;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import dev.atoms.agent.TaskApprovalPolicy;
-import dev.atoms.agent.GenerationService;
+import dev.atoms.agent.approval.TaskApprovalPolicy;
+import dev.atoms.agent.runtime.GenerationService;
 import dev.atoms.agent.model.ModelCatalog;
 import dev.atoms.agent.persistence.Store;
 import jakarta.servlet.http.HttpServletRequest;

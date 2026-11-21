@@ -30,16 +30,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "atoms.demo=false", "atoms.model.api-key=local-memory-fixture",
+        "atoms.model.api-key=local-memory-fixture",
         "atoms.gateway.tenant-tokens.memory=test-tenant-root",
         "atoms.gateway.jwt.signing-key=private-memory-test-signing-secret",
         "atoms.memory.user-files.private-recall-enabled=true",
         "atoms.memory.user-files.recall-enabled=true", "atoms.memory.user-files.auto-write-enabled=true",
-        "spring.datasource.url=jdbc:h2:mem:gateway_private_memory;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-        "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
-        "spring.datasource.password=", "spring.sql.init.mode=always"
+        "spring.sql.init.mode=always"
 })
-class GatewayPrivateMemoryHttpTest {
+class GatewayPrivateMemoryHttpTest extends dev.atoms.MySqlTestDatabase {
     @LocalServerPort int port;
     @Autowired ObjectMapper json;
     private static HttpServer provider;

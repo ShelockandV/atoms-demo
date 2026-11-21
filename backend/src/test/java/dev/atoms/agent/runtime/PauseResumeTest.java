@@ -1,4 +1,6 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
+
+import dev.atoms.agent.approval.TaskApprovalPolicy;
 
 import dev.atoms.agent.pattern.ExecutionPattern;
 import dev.atoms.agent.pattern.PatternRegistry;
@@ -41,7 +43,7 @@ class PauseResumeTest {
  String pid,rid;
 
  @BeforeEach void setup() {
-  source=new DriverManagerDataSource("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1","sa","");
+  source=dev.atoms.MySqlTestDatabase.create();
   new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
   store=new Store(new JdbcTemplate(source),new TransactionTemplate(new DataSourceTransactionManager(source)),json);
   pid=(String)store.create(owner,"暂停恢复测试").get("id");
@@ -54,6 +56,20 @@ class PauseResumeTest {
  void awaitSuccess() {
   assertTimeoutPreemptively(Duration.ofSeconds(5),()->{while(!Set.of("SUCCEEDED","FAILED").contains(status()))Thread.sleep(20);});
   assertEquals("SUCCEEDED",status());
+ }
+
+ @Test void sessionArtifactsRemainAvailableAfterCancellationAndAcrossRuns() {
+  String token = store.claim(rid, owner);
+  store.writeWorkspaceFile(rid, owner, token, "artifacts/report.md", "# Findings");
+  assertEquals("# Findings", store.workspaceFiles(pid, owner).get("artifacts/report.md"));
+  assertThrows(IllegalArgumentException.class,
+          () -> store.writeWorkspaceFile(rid, owner, token, "../outside", "blocked"));
+  service.cancel(rid, owner);
+  assertThrows(Store.StaleExecution.class,
+          () -> store.writeWorkspaceFile(rid, owner, token, "artifacts/report.md", "stale"));
+  String next = (String) store.queue(pid, owner, "读取上次的报告", null, "build", "test-model").get("id");
+  assertEquals("# Findings", store.workspaceArtifactsForRun(next, owner).get("artifacts/report.md"));
+  assertTrue(store.workspaceArtifactsForRun(next, "another-owner").isEmpty());
  }
 
  @Test void lateProviderResultCannotOverwriteResumedRun()throws Exception {

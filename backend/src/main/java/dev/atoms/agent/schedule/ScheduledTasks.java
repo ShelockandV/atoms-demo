@@ -1,4 +1,7 @@
-package dev.atoms.agent;
+package dev.atoms.agent.schedule;
+
+import dev.atoms.agent.approval.TaskApprovalPolicy;
+import dev.atoms.agent.runtime.TemporalTaskRuntime;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -235,7 +238,7 @@ public class ScheduledTasks {
         }
     }
 
-    void enqueueTemporal(String id, String version, long occurrence) {
+    public void enqueueTemporal(String id, String version, long occurrence) {
         tx.executeWithoutResult(status -> {
             var rows = db.queryForList("SELECT * FROM scheduled_tasks WHERE id=? FOR UPDATE", id);
             if (rows.isEmpty()) return;

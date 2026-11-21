@@ -1,11 +1,12 @@
 package dev.atoms.web;
 
-import dev.atoms.agent.TaskApprovalPolicy;
-import dev.atoms.agent.GenerationService;
-import dev.atoms.agent.GatewayAgents;
-import dev.atoms.agent.ScheduledTasks;
-import dev.atoms.agent.TemporalTaskRuntime;
+import dev.atoms.agent.approval.TaskApprovalPolicy;
+import dev.atoms.agent.runtime.GenerationService;
+import dev.atoms.agent.gateway.GatewayAgents;
+import dev.atoms.agent.schedule.ScheduledTasks;
+import dev.atoms.agent.runtime.TemporalTaskRuntime;
 import dev.atoms.agent.model.ModelCatalog;
+import dev.atoms.agent.model.ImageClient;
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.pattern.PatternRegistry;
 import dev.atoms.agent.pattern.LearningRouter;
@@ -284,6 +285,11 @@ public class ApiController {
     @GetMapping("/v1/sessions/{id}/documents/search")
     Object searchWorkspaceDocuments(@PathVariable String id, @RequestParam String query, HttpSession session) {
         return Map.of("hits", store.searchGatewayDocuments(id, gatewayOwner(session), query));
+    }
+
+    @GetMapping("/projects/{id}/workspace")
+    Object projectWorkspace(@PathVariable String id, HttpSession session) {
+        return store.workspaceFiles(id, owner(session));
     }
 
     @GetMapping("/v1/sessions/{id}/files")
@@ -702,8 +708,7 @@ public class ApiController {
     Map<String, Object> config(HttpSession s) {
         owner(s);
         var config = new LinkedHashMap<String, Object>(catalog.view());
-        config.put("demo", model.isDemo());
-        config.put("model", model.isDemo() ? "内置演示模板" : model.defaultModel());
+        config.put("model", model.defaultModel());
         config.put("configured", model.isConfigured());
         config.put("patterns", PatternRegistry.catalog());
         config.put("templates", templates.catalog());
@@ -817,7 +822,8 @@ public class ApiController {
             }
             if (count >= 20) throw Store.error(429, "每个会话每小时最多生成20次，请稍后再试");
             var run = store.queue(id, owner, input.prompt(), input.baseVersion(), mode, selectedModel, pattern, skill, template, context, approval, recalledMemory,
-                    memory.captureScope(memoryScope), catalog.stageModels(mode, input.model()));
+                    memory.captureScope(memoryScope), catalog.stageModels(mode, input.model()),
+                    "image".equals(mode) && ImageClient.editsPreviousImage(input.prompt()));
             s.setAttribute("quotaStart", start);
             s.setAttribute("quotaCount", count + 1);
             generation.submit((String) run.get("id"), id, owner, input.prompt(), input.baseVersion(), mode, selectedModel);

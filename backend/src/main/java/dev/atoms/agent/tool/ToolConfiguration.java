@@ -1,10 +1,5 @@
-package dev.atoms.agent;
+package dev.atoms.agent.tool;
 
-import dev.atoms.agent.tool.ToolRegistry;
-import dev.atoms.agent.tool.HttpToolFactory;
-import dev.atoms.agent.tool.OpenApiToolImport;
-import dev.atoms.agent.tool.McpToolFactory;
-import dev.atoms.agent.tool.AgentTool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import dev.atoms.agent.tool.builtin.BuiltinTools;

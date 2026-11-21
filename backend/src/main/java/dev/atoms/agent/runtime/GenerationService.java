@@ -1,4 +1,7 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
+
+import dev.atoms.agent.approval.TaskApprovalPolicy;
+import dev.atoms.agent.gateway.GatewayAgents;
 
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.persistence.Store;
@@ -387,7 +390,11 @@ public class GenerationService {
             }
             if ("image".equals(mode)) {
                 store.stage(rid, owner, token, "IMAGING");
-                var result = images.generate(prompt, selectedModel, rid.replace("-", ""));
+                var source = store.imageSource(rid, pid).orElse(null);
+                String traceId = rid.replace("-", "");
+                var result = source == null ? images.generate(prompt, selectedModel, traceId)
+                        : images.edit(prompt, selectedModel, traceId,
+                                new ImageClient.Image((byte[]) source.get("image_data"), (String) source.get("media_type")));
                 store.finishReply(rid, pid, model.isDemo() ? "【演示图片】此图为本地示例，不代表真实模型生成。" : "图片已生成并保存，可预览或下载原图。", mode, selectedModel, result.bytes(), result.mediaType(), prompt, token);
                 return;
             }

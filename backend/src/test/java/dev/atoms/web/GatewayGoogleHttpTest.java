@@ -16,16 +16,15 @@ import java.net.http.HttpResponse;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doReturn;
 
+@org.springframework.context.annotation.Import(dev.atoms.OfflineModelTestConfiguration.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "atoms.demo=true", "atoms.gateway.tenant-tokens.alpha=configured-root",
+        "atoms.gateway.tenant-tokens.alpha=configured-root",
         "atoms.gateway.jwt.signing-key=google-session-test-signing-key-with-enough-bytes",
         "atoms.gateway.google.gmail-members.[allowed@gmail.com]=alpha",
         "atoms.gateway.google.client-id=local-test", "atoms.gateway.google.members.10001=alpha",
-        "spring.datasource.url=jdbc:h2:mem:gateway_google;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-        "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
-        "spring.datasource.password=", "spring.sql.init.mode=always"
+        "spring.sql.init.mode=always"
 })
-class GatewayGoogleHttpTest {
+class GatewayGoogleHttpTest extends dev.atoms.MySqlTestDatabase {
     @LocalServerPort int port;
     @Autowired ObjectMapper json;
     @Autowired JdbcTemplate db;

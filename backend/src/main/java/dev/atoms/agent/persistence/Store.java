@@ -1,8 +1,9 @@
 package dev.atoms.agent.persistence;
 
+import dev.atoms.workspace.SourceFiles;
 import dev.atoms.agent.skill.Skill;
 
-import dev.atoms.agent.AgentLoop;
+import dev.atoms.agent.runtime.AgentLoop;
 
 import dev.atoms.workspace.ProjectContext;
 import dev.atoms.workspace.DocumentIndex;
@@ -246,6 +247,21 @@ public class Store {
         result.put("baseVersion", r.get("base_version"));
         result.put("createdAt", r.get("created_at"));
         String rid = (String) r.get("id");
+        result.put("timeline", db.queryForList("""
+                SELECT event_id AS seq,event_type AS type,created_at AS timestamp
+                FROM task_events WHERE run_id=? AND event_type IN (
+                    'WORKFLOW_STARTED','ANSWERING','PLANNING','RESEARCHING','WORKFLOW_PAUSED','WORKFLOW_RESUMED',
+                    'WORKFLOW_COMPLETED','WORKFLOW_CANCELLED','WORKFLOW_FAILED')
+                ORDER BY event_id DESC LIMIT 100
+                """, rid).reversed());
+        if ("SUCCEEDED".equals(r.get("status"))) {
+            db.queryForList("""
+                    SELECT LEFT(m.content,800) FROM messages m JOIN message_details d ON d.message_id=m.id
+                    WHERE d.run_id=? AND m.project_id=? AND m.role='assistant'
+                    ORDER BY m.created_at DESC LIMIT 1
+                    """, String.class, rid, r.get("project_id")).stream().findFirst()
+                    .ifPresent(preview -> result.put("outputPreview", preview));
+        }
         var planReview = reviewHead(rid);
         planReview.ifPresent(review -> result.put("planReviewVersion", review.get("version")));
         if ("AWAITING_APPROVAL".equals(r.get("status"))) {
@@ -436,7 +452,55 @@ public class Store {
     }
 
     public Map<String, String> gatewayWorkspaceFiles(String id, String owner) {
-        return versionFiles(gatewayWorkspaceVersion(id, owner));
+        gatewayWorkspaceVersion(id, owner);
+        return workspaceFiles(id, owner);
+    }
+
+    public Map<String, String> workspaceFiles(String id, String owner) {
+        var project = project(id, owner);
+        var files = new TreeMap<>(versionFiles((String) project.get("current_version")));
+        files.putAll(workspaceArtifacts(id, owner));
+        return files;
+    }
+
+    public Map<String, String> workspaceArtifacts(String project, String owner) {
+        var files = new TreeMap<String, String>();
+        db.query("""
+                SELECT f.file_path,f.content FROM session_workspace_files f JOIN projects p ON p.id=f.project_id
+                WHERE f.project_id=? AND p.owner_id=?
+                """, rs -> { files.put(rs.getString(1), rs.getString(2)); }, project, owner);
+        return files;
+    }
+
+    public Map<String, String> workspaceArtifactsForRun(String run, String owner) {
+        var artifacts = new TreeMap<String, String>();
+        db.query("""
+                SELECT f.file_path,f.content FROM generation_runs r
+                JOIN projects p ON p.id=r.project_id JOIN session_workspace_files f ON f.project_id=p.id
+                WHERE r.id=? AND p.owner_id=?
+                """, rs -> { artifacts.put(rs.getString(1), rs.getString(2)); }, run, owner);
+        return artifacts;
+    }
+
+    public void writeWorkspaceFile(String run, String owner, String token, String path, String content) {
+        SourceFiles.validatePath(path);
+        if (!path.startsWith("artifacts/") || content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 64_000)
+            throw new IllegalArgumentException("会话产物须放在 artifacts/ 下，每个文件最多 64 KB");
+        writeJournal(run, owner, token, () -> {
+            String project = db.queryForObject("SELECT project_id FROM generation_runs WHERE id=?", String.class, run);
+            var files = workspaceArtifacts(project, owner);
+            if (files.keySet().stream().anyMatch(existing ->
+                    existing.startsWith(path + "/") || path.startsWith(existing + "/")))
+                throw new IllegalArgumentException("会话文件和目录名称冲突");
+            files.put(path, content);
+            long bytes = files.values().stream().mapToLong(value -> value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length).sum();
+            if (files.size() > 80 || bytes > 1_000_000)
+                throw new IllegalArgumentException("单个会话最多保存 80 个产物，总大小不得超过 1 MB");
+            db.update("""
+                    INSERT INTO session_workspace_files(project_id,file_path,content) VALUES(?,?,?)
+                    ON DUPLICATE KEY UPDATE content=?
+                    """, project, path, content, content);
+        });
     }
 
     public List<DocumentIndex.Hit> searchGatewayDocuments(String id, String owner, String query) {
@@ -582,6 +646,14 @@ public class Store {
                                      String pattern, Skill skill, WorkflowTemplate template, Map<String, Object> context,
                                      String policyApproval, String recalledMemory, String captureScope,
                                      Map<String, String> stageModels) {
+        return queue(pid, owner, prompt, base, mode, model, pattern, skill, template, context,
+                policyApproval, recalledMemory, captureScope, stageModels, false);
+    }
+
+    public Map<String, Object> queue(String pid, String owner, String prompt, String base, String mode, String model,
+                                     String pattern, Skill skill, WorkflowTemplate template, Map<String, Object> context,
+                                     String policyApproval, String recalledMemory, String captureScope,
+                                     Map<String, String> stageModels, boolean editPreviousImage) {
         String selectedPattern = PatternRegistry.require(pattern).name();
         return tx.execute(status -> {
             if (context != null) {
@@ -597,6 +669,13 @@ public class Store {
                     ? "AWAITING_APPROVAL" : "QUEUED";
             db.update("INSERT INTO generation_runs(id,project_id,status,base_version,prompt,created_at) VALUES(?,?,?,?,?,?)", rid, pid, initialStatus, base, prompt, now());
             db.update("INSERT INTO run_options VALUES(?,?,?)", rid, mode, model);
+            if (editPreviousImage) {
+                String source = db.queryForList("""
+                        SELECT id FROM image_assets WHERE project_id=? ORDER BY created_at DESC,id DESC LIMIT 1
+                        """, String.class, pid).stream().findFirst()
+                        .orElseThrow(() -> error(400, "当前会话还没有可编辑的图片，请先生成一张"));
+                db.update("INSERT INTO run_image_sources(run_id,asset_id) VALUES(?,?)", rid, source);
+            }
             stageModels.forEach((stage, stageModel) -> db.update(
                     "INSERT INTO run_stage_models(run_id,stage,model) VALUES(?,?,?)", rid, stage, stageModel));
             if (captureScope != null) db.update("INSERT INTO run_gateway_memory_capture(run_id,memory_scope) VALUES(?,?)", rid, captureScope);
@@ -752,11 +831,14 @@ public class Store {
     void stage(String id, String status) {
         db.update("UPDATE generation_runs SET status=? WHERE id=?", status, id);
         switch (status) {
-            case "ANSWERING", "PLANNING", "RESEARCHING" -> db.update("""
-                    INSERT INTO task_events(run_id,event_type,created_at)
-                    SELECT ?, 'WORKFLOW_STARTED', ? WHERE NOT EXISTS
-                    (SELECT 1 FROM task_events WHERE run_id=? AND event_type='WORKFLOW_STARTED')
-                    """, id, now(), id);
+            case "ANSWERING", "PLANNING", "RESEARCHING" -> {
+                db.update("""
+                        INSERT INTO task_events(run_id,event_type,created_at)
+                        SELECT ?, 'WORKFLOW_STARTED', ? WHERE NOT EXISTS
+                        (SELECT 1 FROM task_events WHERE run_id=? AND event_type='WORKFLOW_STARTED')
+                        """, id, now(), id);
+                taskEvent(id, status);
+            }
             case "SUCCEEDED" -> taskEvent(id, "WORKFLOW_COMPLETED");
             case "CANCELLED" -> taskEvent(id, "WORKFLOW_CANCELLED");
         }
@@ -1859,6 +1941,13 @@ public class Store {
                     SELECT 1 FROM gateway_memory_entries m WHERE m.memory_scope=c.memory_scope AND m.content=?
                 )
                 """, extracted, now(), run, extracted);
+    }
+
+    public Optional<Map<String, Object>> imageSource(String run, String project) {
+        return db.queryForList("""
+                SELECT a.image_data,a.media_type FROM run_image_sources s JOIN image_assets a ON a.id=s.asset_id
+                WHERE s.run_id=? AND a.project_id=?
+                """, run, project).stream().findFirst();
     }
 
     public Map<String, Object> asset(String id, String owner) {

@@ -6,10 +6,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import javax.imageio.ImageIO;
-import java.awt.*;
-import java.awt.image.BufferedImage;
-import java.io.*;
 import java.net.URI;
 import java.net.http.*;
 import java.time.Duration;
@@ -23,7 +19,6 @@ import java.util.List;
  */
 @Component
 public class ImageClient {
-    private final boolean demo;
     private final String textBase, textKey;
     final ObjectMapper json;
     final String configuredEndpoint, key, size;
@@ -37,12 +32,11 @@ public class ImageClient {
     public record Image(byte[] bytes, String mediaType) {
     }
 
-    ImageClient(ObjectMapper json,
-                @Value("${atoms.demo}") boolean demo, @Value("${atoms.model.base-url}") String textBase,
+    public ImageClient(ObjectMapper json,
+                @Value("${atoms.model.base-url}") String textBase,
                 @Value("${atoms.model.api-key}") String textKey,
                 @Value("${atoms.model.image.endpoint:}") String endpoint, @Value("${atoms.model.image.api-key:}") String key,
                 @Value("${atoms.model.image.size:1024*1024}") String size) {
-        this.demo = demo;
         this.textBase = textBase;
         this.textKey = textKey;
         this.json = json;
@@ -50,6 +44,9 @@ public class ImageClient {
         this.key = key;
         this.size = size;
     }
+
+    @Value("${atoms.model.image.download-fallback-dns:}")
+    private String downloadFallbackDns = "";
 
     URI endpoint() {
         if (!configuredEndpoint.isBlank()) {
@@ -67,15 +64,42 @@ public class ImageClient {
         return URI.create(base.getScheme() + "://" + base.getRawAuthority() + "/api/v1/services/aigc/multimodal-generation/generation");
     }
 
+    private static final java.util.regex.Pattern IMAGE_REFERENCE = java.util.regex.Pattern.compile(
+            "上一张|上张|前一张|刚才.{0,8}(图|照片)|(?:这|那)(?:张|个)(?:图|照片)|原图|(?:在|给|把)(?:图片|图像|图|照片)(?:上|里|中)|(?:previous|last|this|that|the) (?:image|picture|photo)",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+    private static final java.util.regex.Pattern IMAGE_CHANGE = java.util.regex.Pattern.compile(
+            "加|改|换|删|移|裁|调整|编辑|保留|补|add|edit|change|remove|replace|crop|keep",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    public static boolean editsPreviousImage(String prompt) {
+        return IMAGE_REFERENCE.matcher(prompt).find() && IMAGE_CHANGE.matcher(prompt).find();
+    }
+
     public Image generate(String prompt, String selectedModel) throws Exception {
         return generate(prompt, selectedModel, null);
     }
 
     public Image generate(String prompt, String selectedModel, String traceId) throws Exception {
-        if (demo) return demo();
+        return requestImage(prompt, selectedModel, traceId, null);
+    }
+
+    public Image edit(String prompt, String selectedModel, String traceId, Image source) throws Exception {
+        return requestImage(prompt, selectedModel, traceId, source);
+    }
+
+    private Image requestImage(String prompt, String selectedModel, String traceId, Image source) throws Exception {
         String apiKey = key.isBlank() ? textKey : key;
         if (apiKey.isBlank()) throw new IllegalArgumentException("请配置图像模型 API Key 或文本模型 API Key");
-        var payload = Map.of("model", selectedModel, "input", Map.of("messages", List.of(Map.of("role", "user", "content", List.of(Map.of("text", prompt))))), "parameters", Map.of("size", size, "n", 1, "prompt_extend", true));
+        var content = new java.util.ArrayList<Map<String, String>>();
+        if (source != null) {
+            content.add(Map.of("image", "data:" + source.mediaType() + ";base64,"
+                    + java.util.Base64.getEncoder().encodeToString(source.bytes())));
+        }
+        content.add(Map.of("text", prompt));
+        var parameters = source == null ? Map.of("size", size, "n", 1, "prompt_extend", true)
+                : Map.of("n", 1, "prompt_extend", false);
+        var payload = Map.of("model", selectedModel, "input", Map.of("messages",
+                List.of(Map.of("role", "user", "content", content))), "parameters", parameters);
         var req = HttpRequest.newBuilder(endpoint()).timeout(Duration.ofSeconds(240))
                 .header("Content-Type", "application/json").header("Authorization", "Bearer " + apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(payload)));
@@ -93,30 +117,9 @@ public class ImageClient {
             }
         if (url.isBlank()) throw new IllegalStateException("图像服务未返回图片，请检查图像模型和接口类型是否匹配");
         // Fetch only provider-owned OSS results. Never forward the API key to storage.
-        var download = PublicHttps.get(URI.create(url), host -> host.endsWith(".aliyuncs.com"), 8_000_000);
+        var download = PublicHttps.getProviderImage(URI.create(url), 8_000_000, downloadFallbackDns);
         if (!Set.of("image/png", "image/jpeg", "image/webp").contains(download.mediaType()))
             throw new IllegalStateException("图片格式不受支持");
         return new Image(download.bytes(), download.mediaType());
-    }
-
-    Image demo() throws IOException {
-        var image = new BufferedImage(768, 768, BufferedImage.TYPE_INT_RGB);
-        var g = image.createGraphics();
-        try {
-            g.setPaint(new GradientPaint(0, 0, new Color(97, 86, 220), 768, 768, new Color(244, 178, 153)));
-            g.fillRect(0, 0, 768, 768);
-            g.setColor(new Color(255, 255, 255, 65));
-            g.fillOval(190, 150, 460, 460);
-            g.setColor(Color.WHITE);
-            g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 45));
-            g.drawString("Atoms Image Demo", 125, 370);
-            g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 20));
-            g.drawString("Offline sample - not AI generated", 200, 420);
-        } finally {
-            g.dispose();
-        }
-        var out = new ByteArrayOutputStream();
-        ImageIO.write(image, "png", out);
-        return new Image(out.toByteArray(), "image/png");
     }
 }

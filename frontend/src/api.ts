@@ -11,7 +11,6 @@ export interface ModelConfig {
   learningRouting?: boolean;
   patterns?: { id: string; description: string }[];
   templates?: { id: string; name: string; description: string; version: string }[];
-  demo: boolean;
   model: string;
   configured: boolean;
   models: Record<Mode, string[]>;
@@ -56,6 +55,8 @@ export interface Run {
   template?: string;
   templateVersion?: string;
   steps?: AgentStep[];
+  timeline?: { seq: number; type: string; timestamp: string }[];
+  outputPreview?: string;
   usage?: {
     modelCalls: number;
     models?: { model: string; meteredCalls: number; promptTokens: number; completionTokens: number }[];

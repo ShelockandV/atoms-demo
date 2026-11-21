@@ -13,6 +13,9 @@ public interface ToolContext extends DagExecutor.Runtime {
     void stage(String stage) throws InterruptedException;
     Map<String, String> workspace();
     Map<String, String> baseline();
+    default void writeWorkspaceFile(String path, String content) {
+        throw new UnsupportedOperationException("当前工具上下文不允许写会话文件");
+    }
     String searchDocuments(String query);
     Map<String, String> files();
     void files(Map<String, String> files);

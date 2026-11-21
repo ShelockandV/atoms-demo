@@ -26,7 +26,10 @@ spring:
     multipart:
       max-request-size: 1MB
 atoms:
-  demo: false
+  temporal:
+    enabled: true
+    target: 127.0.0.1:7233
+    namespace: default
   agent:
     learning-router-enabled: true
     max-steps: 12

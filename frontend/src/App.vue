@@ -59,7 +59,9 @@ import {
 } from "./api";
 import { canPreview, previewDocument } from "./preview";
 import ComposerOptions from "./ComposerOptions.vue";
+import SessionWorkspace from "./SessionWorkspace.vue";
 import AgentTrace from "./AgentTrace.vue";
+import RunTimeline from "./RunTimeline.vue";
 import SchedulePanel from "./SchedulePanel.vue";
 import GatewayAccount from "./GatewayAccount.vue";
 import GatewayMemoryPanel from "./GatewayMemoryPanel.vue";
@@ -105,7 +107,6 @@ const showGatewayMemory = ref(false);
 const projects = ref<Project[]>([]),
   project = ref<Detail | null>(null);
 const config = ref<ModelConfig>({
-    demo: true,
     model: "",
     configured: false,
     models: { build: [], chat: [], image: [], research: [] },
@@ -184,6 +185,7 @@ const historyQuery = ref("");
 const sessionView = ref<"conversation" | "summary">("conversation");
 const showTimeline = ref(false);
 const showWorkspace = ref(false);
+const showVersionEditor = ref(false);
 const currency = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD", maximumFractionDigits: 6 });
 const dateTime = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" });
 const mobile = ref(false),
@@ -381,6 +383,7 @@ async function openProject(id: string, force = false) {
       sessionView.value = "conversation";
       showTimeline.value = false;
       showWorkspace.value = false;
+      showVersionEditor.value = false;
     }
     if (!force || !browsingSessions.value) browsingSessions.value = false;
     if (!force && window.innerWidth <= 850) sidebar.value = false;
@@ -466,6 +469,9 @@ async function submit() {
         createdAt: new Date().toISOString(),
       });
       project.value.run = run;
+      if (!showWorkspace.value && !showVersionEditor.value && window.matchMedia("(min-width: 961px)").matches) {
+        showTimeline.value = true;
+      }
       if (run.status !== "AWAITING_APPROVAL") watchRun(run.id, id);
     }
   } catch (e) {
@@ -818,9 +824,7 @@ onUnmounted(() => {
             >{{
               !connected
                 ? "服务未连接"
-                : config.demo
-                  ? "演示模式"
-                  : "模型已配置"
+                : config.configured ? "模型已配置" : "模型未配置"
             }}</span
           ><button
             v-if="project && !browsingSessions"
@@ -915,7 +919,7 @@ onUnmounted(() => {
           </div>
         </section>
       </div>
-      <div v-else class="workbench" :class="{ 'conversation-only': !showWorkspace && !showTimeline, 'timeline-open': showTimeline }">
+      <div v-else class="workbench" :class="{ 'conversation-only': !showWorkspace && !showTimeline && !showVersionEditor, 'timeline-open': showTimeline || showWorkspace }">
         <section class="chat-panel">
           <div class="session-toolbar" aria-label="会话视图">
             <div>
@@ -923,8 +927,9 @@ onUnmounted(() => {
               <button :aria-pressed="sessionView === 'summary'" @click="sessionView = 'summary'">摘要</button>
             </div>
             <div>
-              <button :aria-pressed="showTimeline" @click="showTimeline = !showTimeline; if (showTimeline) showWorkspace = false"><Activity :size="15" /> 执行时间线</button>
-              <button :aria-pressed="showWorkspace" @click="showWorkspace = !showWorkspace; if (showWorkspace) showTimeline = false"><FolderOpen :size="15" /> 工作空间</button>
+              <button :aria-pressed="showTimeline" @click="showTimeline = !showTimeline; if (showTimeline) { showWorkspace = false; showVersionEditor = false }"><Activity :size="15" /> 执行时间线</button>
+              <button :aria-pressed="showWorkspace" @click="showWorkspace = !showWorkspace; if (showWorkspace) { showTimeline = false; showVersionEditor = false }"><FolderOpen :size="15" /> 工作空间</button>
+              <button v-if="project.currentVersion" :aria-pressed="showVersionEditor" @click="showVersionEditor = !showVersionEditor; if (showVersionEditor) { showWorkspace = false; showTimeline = false }"><Code2 :size="15" /> 版本编辑</button>
             </div>
           </div>
           <section v-if="sessionView === 'summary'" class="session-summary">
@@ -959,7 +964,7 @@ onUnmounted(() => {
               </div>
               <p>{{ m.content }}</p>
               <div v-if="m.imageUrl" class="message-image">
-                <button @click="view = 'images'; showWorkspace = true; showTimeline = false">
+                <button @click="showWorkspace = true; showTimeline = false; showVersionEditor = false">
                   <img
                     :src="m.imageUrl"
                     alt="根据需求生成的图片"
@@ -1080,9 +1085,7 @@ onUnmounted(() => {
           <div class="chat-disclaimer">
             Enter 发送 · Shift+Enter 换行 ·
             {{
-              config.demo
-                ? "演示模式 · 未调用真实模型"
-                : mode === "image"
+              mode === "image"
                   ? "图片单独计费 · 每次生成一张"
                   : mode === "chat"
                     ? "对话不会修改代码或创建版本"
@@ -1093,19 +1096,24 @@ onUnmounted(() => {
         </section>
             <aside v-if="showTimeline" class="session-timeline" aria-label="执行时间线">
             <header><h2>执行时间线</h2><button class="icon-button" aria-label="关闭时间线" @click="showTimeline = false"><X :size="16" /></button></header>
-            <p v-if="!project.run?.swarmBoard?.length && !project.run?.steps?.length && !project.run?.nodes?.length">暂无执行事件。</p>
-            <SwarmBoard v-if="project.run?.swarmBoard?.length" :teams="project.run.swarmBoard"
-              :run-status="project.run.status" />
-            <AgentTrace
-              v-if="project.run?.steps?.length || project.run?.nodes?.length"
-              :steps="project.run.steps || []"
-              :status="project.run.status"
-              :usage="project.run.usage"
-              :pattern="project.run.mode === 'research' ? 'research' : project.run.pattern"
-              :nodes="project.run.nodes"
-            />
+            <p v-if="!project.run">暂无执行事件。</p>
+            <RunTimeline v-else :run="project.run">
+              <template v-if="project.run.swarmBoard?.length || project.run.steps?.length || project.run.nodes?.length" #steps>
+                <SwarmBoard v-if="project.run.swarmBoard?.length" :teams="project.run.swarmBoard"
+                  :run-status="project.run.status" />
+                <AgentTrace v-if="project.run.steps?.length || project.run.nodes?.length"
+                  :steps="project.run.steps || []"
+                  :status="project.run.status"
+                  :pattern="project.run.mode === 'research' ? 'research' : project.run.pattern"
+                  :nodes="project.run.nodes"
+                />
+              </template>
+            </RunTimeline>
             </aside>
-        <section v-show="showWorkspace" class="output-panel">
+        <SessionWorkspace v-if="showWorkspace" :key="project.id" :project-id="project.id"
+          :active="active" :revision="`${project.currentVersion ?? ''}:${project.run?.status ?? ''}`"
+          :images="generatedImages" @close="showWorkspace = false" />
+        <section v-show="showVersionEditor" class="output-panel">
           <div class="preview-toolbar">
             <div class="view-switch">
               <button
@@ -1367,7 +1375,7 @@ onUnmounted(() => {
                       : "准备就绪"
               }}</span
             ><span
-              >{{ config.demo ? "Demo workspace" : "AI workspace" }}
+              >AI workspace
               <span>✧</span></span
             >
           </div>
@@ -1524,11 +1532,7 @@ onUnmounted(() => {
         <div class="help-mode">
           <CircleAlert :size="16" />
           <p>
-            {{
-              config.demo
-                ? "当前为离线演示。问答和图片均为示例，配置真实模型后即可正式使用。"
-                : "输入框下方可以切换构建、对话与图像模式，并选择对应模型。对话和生图不修改应用版本。图片单独计费，生成后保存到项目。"
-            }}<br />工作台项目保存于服务端，使用当前浏览器匿名会话访问。
+            从右上角切换 Agent，在任务选项里选择模型。对话和生图不会修改应用版本。生成的图片保存在项目中。<br />工作台项目保存于服务端，使用当前浏览器匿名会话访问。
           </p>
         </div>
         <button class="button primary help-start" @click="help = false">

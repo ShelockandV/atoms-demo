@@ -1,6 +1,6 @@
 package dev.atoms.web;
 
-import dev.atoms.agent.GenerationService;
+import dev.atoms.agent.runtime.GenerationService;
 import dev.atoms.agent.persistence.Store;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;

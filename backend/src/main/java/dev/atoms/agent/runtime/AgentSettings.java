@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;

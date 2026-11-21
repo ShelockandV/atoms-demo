@@ -41,6 +41,5 @@ const options = computed(() => props.config.models[props.mode] || []);
     >
       <option v-for="id in options" :key="id" :value="id">{{ id === "auto" ? "自动选择" : id }}</option>
     </select>
-    <span v-if="config.demo" class="demo-label">演示</span>
   </div>
 </template>

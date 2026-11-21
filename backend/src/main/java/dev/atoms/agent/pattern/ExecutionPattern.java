@@ -1,6 +1,6 @@
 package dev.atoms.agent.pattern;
 
-import dev.atoms.agent.AgentLoop.Decision;
+import dev.atoms.agent.runtime.AgentLoop.Decision;
 
 import java.util.List;
 

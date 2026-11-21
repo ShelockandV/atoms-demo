@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
 
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.persistence.Store;
@@ -12,7 +12,6 @@ import org.junit.jupiter.api.*;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -34,8 +33,7 @@ class AgentLoopTest {
     final AgentSettings settings = new AgentSettings(12, 2, 6);
 
     @BeforeEach void setup() {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID()
-                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        var source = dev.atoms.MySqlTestDatabase.create();
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
         store = new Store(new JdbcTemplate(source), new TransactionTemplate(new DataSourceTransactionManager(source)), json);
         model = new ScriptedModel(json);
@@ -67,6 +65,20 @@ class AgentLoopTest {
         assertTrue(steps.stream().allMatch(s -> "SUCCEEDED".equals(s.get("outcome"))));
         assertNotNull(steps.getFirst().get("updatedAt"));
         assertTrue(model.messages.stream().anyMatch(m -> m.getLast().get("content").contains("<body>页面</body>")));
+    }
+
+    @Test void reactCanWriteAndReadSessionArtifact() throws Exception {
+        model.responses.add("""
+                {"action":"WRITE_WORKSPACE_FILE","arguments":{"path":"artifacts/report.md","content":"# Analysis"}}
+                """);
+        model.responses.add("""
+                {"action":"READ_FILE","arguments":{"path":"artifacts/report.md"}}
+                """);
+        actions("GENERATE", "VALIDATE", "FINISH");
+        model.outputs.add(validFiles("页面"));
+        assertEquals(validFiles("页面"), execute(settings));
+        assertEquals("# Analysis", store.workspaceFiles(pid, owner).get("artifacts/report.md"));
+        assertTrue(model.messages.stream().anyMatch(messages -> messages.getLast().get("content").contains("# Analysis")));
     }
 
     @Test void prematureFinishAndUnknownToolCannotBypassValidation() throws Exception {

@@ -8,7 +8,6 @@ import dev.atoms.workspace.ProjectContext;
 import dev.atoms.agent.tool.ToolRegistry;
 import dev.atoms.agent.tool.builtin.BuiltinTools;
 
-import dev.atoms.workspace.DemoTemplates;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -155,7 +154,12 @@ public class ModelClient {
     }
 
     @org.springframework.beans.factory.annotation.Autowired
-    public ModelClient(ObjectMapper json, @Value("${atoms.demo}") boolean demo, @Value("${atoms.model.base-url}") String base, @Value("${atoms.model.api-key}") String key, @Value("${atoms.model.name}") String model, @Value("${atoms.model.timeout-seconds:300}") int timeoutSeconds, @Value("${atoms.model.max-output-tokens:16000}") int maxOutputTokens, ToolRegistry<ToolContext> tools) {
+    public ModelClient(ObjectMapper json, @Value("${atoms.model.base-url}") String base, @Value("${atoms.model.api-key}") String key, @Value("${atoms.model.name}") String model, @Value("${atoms.model.timeout-seconds:300}") int timeoutSeconds, @Value("${atoms.model.max-output-tokens:16000}") int maxOutputTokens, ToolRegistry<ToolContext> tools) {
+        this(json, false, base, key, model, timeoutSeconds, maxOutputTokens, tools);
+    }
+
+    public ModelClient(ObjectMapper json, boolean demo, String base, String key, String model,
+                       int timeoutSeconds, int maxOutputTokens, ToolRegistry<ToolContext> tools) {
         this.json = json;
         this.tools = tools;
         this.demo = demo;
@@ -482,7 +486,6 @@ public class ModelClient {
     }
 
     public Map<String, String> generate(String prompt, String plan, ProjectContext context, String failure, String selectedModel) throws Exception {
-        if (demo) return DemoTemplates.create(prompt, context.files());
         String output = projectCall("""
                 你是专业软件工程师。严格根据用户要求的语言和技术栈生成真实工程源码。
                 只输出一个JSON对象：每个键是文件相对路径，每个值是该文件完整文本内容。不要包装files字段，不要Markdown围栏，不要把源码嵌入HTML展示，不要省略为伪代码或省略号。

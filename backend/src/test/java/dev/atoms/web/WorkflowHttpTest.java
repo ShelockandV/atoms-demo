@@ -17,16 +17,15 @@ import java.time.Duration;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** 验证工作台所用的 HTTP 流程，例如从模板目录选择版本后提交并批准任务。 */
+@org.springframework.context.annotation.Import(dev.atoms.OfflineModelTestConfiguration.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "atoms.demo=true", "atoms.agent.learning-router-enabled=true",
+        "atoms.agent.learning-router-enabled=true",
         "atoms.research.models.planning=qwen-flash",
         "atoms.model.rates.test.input=1", "atoms.model.rates.test.output=2",
         "atoms.metrics.enabled=true", "atoms.metrics.token=test-metrics-reader",
-        "spring.datasource.url=jdbc:h2:mem:workflow_http;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-        "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
-        "spring.datasource.password=", "spring.sql.init.mode=always"
+        "spring.sql.init.mode=always"
 })
-class WorkflowHttpTest {
+class WorkflowHttpTest extends dev.atoms.MySqlTestDatabase {
     @LocalServerPort int port;
     @Autowired com.fasterxml.jackson.databind.ObjectMapper json;
     @Autowired dev.atoms.agent.persistence.Store store;
@@ -59,6 +58,11 @@ class WorkflowHttpTest {
             assertEquals("【演示回答】compat hello", completion.at("/choices/0/message/content").asText());
             String taskId = completion.path("id").asText().substring("chatcmpl-".length());
             assertEquals("TASK_STATUS_COMPLETED", call(client, "/v1/tasks/" + taskId, null).path("status").asText());
+            var trace = call(client, "/runs/" + taskId, null);
+            assertEquals("WORKFLOW_STARTED", trace.at("/timeline/0/type").asText());
+            assertTrue(trace.path("timeline").toString().contains("ANSWERING"));
+            assertTrue(trace.path("timeline").toString().contains("WORKFLOW_COMPLETED"));
+            assertEquals("【演示回答】compat hello", trace.path("outputPreview").asText());
 
             input.remove("model");
             ((com.fasterxml.jackson.databind.node.ObjectNode) messages.get(1)).putArray("content")
@@ -399,6 +403,17 @@ class WorkflowHttpTest {
             assertEquals(version, store.project(session, owner).get("current_version"));
             var run = call(client, "/runs/" + id, null);
             assertTrue(run.path("nodes").toString().contains("research.report"));
+            if (Boolean.getBoolean("atoms.test.temporal.enabled")) {
+                var readiness = client.send(HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + port + "/readiness")).GET().build(),
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals(200, readiness.statusCode(), readiness.body());
+                assertEquals("ok", json.readTree(readiness.body()).at("/checks/temporal").asText());
+                var history = call(client, "/v1/tasks/" + id + "/timeline", null);
+                assertEquals(id, history.path("workflow_id").asText());
+                assertTrue(history.path("events").toString().contains("WORKFLOW_EXECUTION_STARTED"));
+                assertTrue(history.path("events").toString().contains("CHILD_WORKFLOW_EXECUTION_COMPLETED"));
+            }
         }
     }
 
@@ -432,7 +447,11 @@ class WorkflowHttpTest {
             assertEquals(0.03, updated.path("max_budget_per_run_usd").asDouble());
             call(client, path + "/resume", "{}");
             long occurrence = java.time.Instant.now().getEpochSecond();
-            db.update("UPDATE scheduled_tasks SET next_run_epoch=? WHERE id=?", occurrence, id);
+            if (Boolean.getBoolean("atoms.test.temporal.enabled")) {
+                triggerTemporalSchedule(id);
+            } else {
+                db.update("UPDATE scheduled_tasks SET next_run_epoch=? WHERE id=?", occurrence, id);
+            }
 
             assertTimeoutPreemptively(Duration.ofSeconds(12), () -> {
                 while (true) {
@@ -459,6 +478,25 @@ class WorkflowHttpTest {
                     HttpResponse.BodyHandlers.discarding()).statusCode());
             assertEquals(404, client.send(HttpRequest.newBuilder(URI.create(url)).build(),
                     HttpResponse.BodyHandlers.discarding()).statusCode());
+        }
+    }
+
+    private void triggerTemporalSchedule(String id) {
+        assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
+            while (db.queryForObject("""
+                    SELECT COUNT(*) FROM temporal_schedule_sync t JOIN scheduled_tasks s ON s.id=t.schedule_id
+                    WHERE s.id=? AND t.applied_version=s.updated_at
+                    """, Integer.class, id) == 0) {
+                Thread.sleep(100);
+            }
+        });
+        var service = io.temporal.serviceclient.WorkflowServiceStubs.newServiceStubs(
+                io.temporal.serviceclient.WorkflowServiceStubsOptions.newBuilder()
+                        .setTarget(System.getProperty("atoms.test.temporal.target", "127.0.0.1:7233")).build());
+        try {
+            io.temporal.client.schedules.ScheduleClient.newInstance(service).getHandle("atoms-schedule-" + id).trigger();
+        } finally {
+            service.shutdownNow();
         }
     }
 
@@ -819,6 +857,28 @@ class WorkflowHttpTest {
             assertEquals(404, denied.statusCode());
             assertEquals("CANCELLED", call(owner, path + "/cancel", "").path("status").asText());
             assertEquals("CANCELLED", call(owner, path, null).path("status").asText());
+        }
+    }
+
+    @Test void imageFollowupUsesPreviousResultFromTheSameProject() throws Exception {
+        try (var client = HttpClient.newBuilder().cookieHandler(new CookieManager()).build()) {
+            var project = call(client, "/projects", "{\"title\":\"图片编辑\"}");
+            String id = project.path("id").asText();
+            String path = "/projects/" + id + "/runs";
+            var original = call(client, path, """
+                    {"mode":"image","prompt":"生成一张比熊图片"}
+                    """).path("id").asText();
+            assertTrue(store.imageSource(original, id).isEmpty());
+            assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+                while (!"SUCCEEDED".equals(call(client, "/runs/" + original, null).path("status").asText())) {
+                    Thread.sleep(30);
+                }
+            });
+            var edit = call(client, path, """
+                    {"mode":"image","prompt":"在图片上加一个人物"}
+                    """).path("id").asText();
+            assertTrue(store.imageSource(edit, id).isPresent());
+            assertTrue(store.imageSource(edit, "another-project").isEmpty());
         }
     }
 

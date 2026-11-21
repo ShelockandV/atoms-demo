@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS image_assets (
  created_at VARCHAR(40) NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id)
 );
 
+CREATE TABLE IF NOT EXISTS session_workspace_files (
+ project_id VARCHAR(36) NOT NULL, file_path VARCHAR(240) COLLATE utf8mb4_bin NOT NULL,
+ content MEDIUMTEXT NOT NULL, PRIMARY KEY(project_id,file_path),
+ FOREIGN KEY(project_id) REFERENCES projects(id)
+) DEFAULT CHARACTER SET utf8mb4;
+
+CREATE TABLE IF NOT EXISTS run_image_sources (
+ run_id VARCHAR(36) PRIMARY KEY, asset_id VARCHAR(36) NOT NULL,
+ FOREIGN KEY(run_id) REFERENCES generation_runs(id), FOREIGN KEY(asset_id) REFERENCES image_assets(id)
+);
+
 CREATE TABLE IF NOT EXISTS run_checkpoints (
  run_id VARCHAR(36) PRIMARY KEY, execution_token VARCHAR(36),
  files MEDIUMTEXT, failure MEDIUMTEXT, attempt INT NOT NULL DEFAULT 0,

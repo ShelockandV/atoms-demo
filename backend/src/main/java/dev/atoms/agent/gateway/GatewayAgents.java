@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.gateway;
 
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.persistence.Store;
@@ -69,7 +69,7 @@ public final class GatewayAgents {
         model.tools().validate(model.tools().require(tool), arguments, model.json());
     }
 
-    static boolean toolAllowed(ModelClient model, String name) {
+    public static boolean toolAllowed(ModelClient model, String name) {
         var tool = model.tools().require(name);
         var metadata = tool.metadata();
         return !metadata.requiresAuth() && !metadata.dangerous()

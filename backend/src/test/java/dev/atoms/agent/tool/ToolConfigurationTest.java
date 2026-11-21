@@ -1,7 +1,6 @@
-package dev.atoms.agent;
+package dev.atoms.agent.tool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import dev.atoms.agent.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;

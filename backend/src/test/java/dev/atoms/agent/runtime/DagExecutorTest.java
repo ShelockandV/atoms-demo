@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
 
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.persistence.Store;
@@ -33,7 +33,7 @@ class DagExecutorTest {
     ModelClient model;
     String pid, rid, token;
     @BeforeEach void setup() {
-        source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        source = dev.atoms.MySqlTestDatabase.create();
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
         var json = new ObjectMapper();
         store = new Store(new JdbcTemplate(source), new TransactionTemplate(new DataSourceTransactionManager(source)), json);

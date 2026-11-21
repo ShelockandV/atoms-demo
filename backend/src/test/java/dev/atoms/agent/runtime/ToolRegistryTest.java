@@ -1,4 +1,6 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
+
+import dev.atoms.agent.tool.builtin.BuiltinTools;
 
 
 
@@ -20,11 +22,12 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class ToolRegistryTest {
     final ObjectMapper json = new ObjectMapper();
-    final ToolRegistry<dev.atoms.agent.tool.builtin.ToolContext> registry = ToolConfiguration.registry();
+    final ToolRegistry<dev.atoms.agent.tool.builtin.ToolContext> registry = new ToolRegistry<>(BuiltinTools.create());
 
     @Test void metadataAndModelSchemasComeFromTheSameCatalog() {
         var names = registry.catalog().stream().map(item -> ((ToolMetadata) item.get("metadata")).name()).toList();
-        assertEquals(List.of("PLAN_DAG", "LIST_FILES", "READ_FILE", "SEARCH_DOCS", "GENERATE", "VALIDATE", "REVIEW", "FINISH"), names);
+        assertEquals(List.of("PLAN_DAG", "LIST_FILES", "READ_FILE", "WRITE_WORKSPACE_FILE", "SEARCH_DOCS",
+                "GENERATE", "VALIDATE", "REVIEW", "FINISH"), names);
         var read = registry.modelDefinitions().stream()
                 .map(definition -> (Map<String, Object>) definition.get("function"))
                 .filter(function -> function.get("name").equals("READ_FILE")).findFirst().orElseThrow();

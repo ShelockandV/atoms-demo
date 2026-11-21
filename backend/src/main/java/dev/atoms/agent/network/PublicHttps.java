@@ -37,6 +37,53 @@ public final class PublicHttps {
         return exchange(new HttpGet(uri), allowedHost, maxBytes, null);
     }
 
+    /** Resolve provider image downloads through a dedicated DNS server when local DNS returns fake IPs. */
+    public static Download getProviderImage(URI uri, int maxBytes, String dnsServer) throws IOException {
+        return exchange(new HttpGet(uri), host -> host.endsWith(".aliyuncs.com"), maxBytes, null, host -> {
+            var local = InetAddress.getAllByName(host);
+            return !dnsServer.isBlank() && local.length > 0 && java.util.Arrays.stream(local).allMatch(PublicHttps::isFakeIp)
+                    ? resolveProviderDns(host, dnsServer) : local;
+        });
+    }
+
+    private static boolean isFakeIp(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        return bytes.length == 4 && Byte.toUnsignedInt(bytes[0]) == 198 && (bytes[1] == 18 || bytes[1] == 19);
+    }
+
+    private static InetAddress[] resolveProviderDns(String host, String server) throws UnknownHostException {
+        if (!server.matches("[0-9]{1,3}(\\.[0-9]{1,3}){3}") || !isPublic(InetAddress.getByName(server)))
+            throw new IllegalArgumentException("图片下载备用 DNS 必须是公网 IPv4 地址");
+        var settings = new java.util.Hashtable<String, String>();
+        settings.put(javax.naming.Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.dns.DnsContextFactory");
+        settings.put(javax.naming.Context.PROVIDER_URL, "dns://" + server + "/");
+        settings.put("com.sun.jndi.dns.timeout.initial", "2000");
+        settings.put("com.sun.jndi.dns.timeout.retries", "1");
+        try {
+            var dns = new javax.naming.directory.InitialDirContext(settings);
+            try {
+                var records = dns.getAttributes(host + ".", new String[]{"A"});
+                var addresses = new java.util.ArrayList<InetAddress>();
+                var record = records.get("A");
+                if (record != null) {
+                    var values = record.getAll();
+                    while (values.hasMore()) {
+                        String address = values.next().toString();
+                        if (!address.matches("[0-9]{1,3}(\\.[0-9]{1,3}){3}")) throw new UnknownHostException(host);
+                        addresses.add(InetAddress.getByName(address));
+                    }
+                }
+                return addresses.toArray(InetAddress[]::new);
+            } finally {
+                dns.close();
+            }
+        } catch (javax.naming.NamingException error) {
+            var failure = new UnknownHostException("图片下载备用 DNS 查询失败");
+            failure.initCause(error);
+            throw failure;
+        }
+    }
+
     public static Download callMcpTool(URI uri, Predicate<String> allowedHost, byte[] payload,
                                        String tool, int maxBytes, EventStreamResponse sse) throws IOException {
         return callMcp(uri, allowedHost, payload, "tools/call", tool, "", maxBytes, sse);
@@ -131,7 +178,12 @@ public final class PublicHttps {
 
     private static org.apache.hc.client5.http.impl.classic.CloseableHttpClient client(URI uri, Predicate<String> allowedHost)
             throws IOException {
-        var dns = pin(uri, allowedHost, InetAddress::getAllByName);
+        return client(uri, allowedHost, InetAddress::getAllByName);
+    }
+
+    private static org.apache.hc.client5.http.impl.classic.CloseableHttpClient client(
+            URI uri, Predicate<String> allowedHost, Lookup lookup) throws IOException {
+        var dns = pin(uri, allowedHost, lookup);
         var connections = PoolingHttpClientConnectionManagerBuilder.create().setDnsResolver(dns)
                 .setDefaultConnectionConfig(ConnectionConfig.custom()
                         .setConnectTimeout(Timeout.ofSeconds(10)).setSocketTimeout(Timeout.ofSeconds(20)).build())
@@ -142,11 +194,16 @@ public final class PublicHttps {
 
     private static Download exchange(HttpUriRequestBase request, Predicate<String> allowedHost, int maxBytes, EventStreamResponse sse)
             throws IOException {
+        return exchange(request, allowedHost, maxBytes, sse, InetAddress::getAllByName);
+    }
+
+    private static Download exchange(HttpUriRequestBase request, Predicate<String> allowedHost, int maxBytes,
+                                     EventStreamResponse sse, Lookup lookup) throws IOException {
         if (maxBytes < 1 || maxBytes > 8_000_000) throw new IllegalArgumentException("读取大小上限无效");
         URI uri;
         try { uri = request.getUri(); }
         catch (URISyntaxException e) { throw new IllegalArgumentException("公网请求地址无效", e); }
-        try (var client = client(uri, allowedHost)) {
+        try (var client = client(uri, allowedHost, lookup)) {
             return client.execute(request, response -> {
                 if (response.getCode() != 200 || response.getEntity() == null) {
                     request.cancel();
@@ -183,8 +240,12 @@ public final class PublicHttps {
         String host = validateEndpoint(uri, allowedHost);
         var addresses = lookup.resolve(host).clone();
         if (addresses.length == 0) throw new UnknownHostException("公网下载域名没有地址");
-        for (var address : addresses)
-            if (!isPublic(address)) throw new IllegalArgumentException("公网下载域名解析到了受限地址");
+        for (var address : addresses) {
+            if (isPublic(address)) continue;
+            if (isFakeIp(address))
+                throw new IllegalArgumentException("公网下载域名解析到了 198.18.0.0/15 虚拟地址，请让代理对该域名返回真实公网 DNS 地址后重试");
+            throw new IllegalArgumentException("公网下载域名解析到了受限地址");
+        }
         return new DnsResolver() {
             @Override public InetAddress[] resolve(String requested) throws UnknownHostException {
                 if (!host.equalsIgnoreCase(requested)) throw new UnknownHostException("连接域名与预检域名不一致");

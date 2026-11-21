@@ -26,7 +26,7 @@ class ImageTraceTest {
         });
         server.start();
         try {
-            var client = new ImageClient(new ObjectMapper(), false, "", "",
+            var client = new ImageClient(new ObjectMapper(), "", "",
                     "http://127.0.0.1:" + server.getAddress().getPort() + "/generate", "test", "1024*1024");
             String trace = "0123456789abcdef0123456789abcdef";
             var failure = assertThrows(IllegalStateException.class, () -> client.generate("示例", "test", trace));

@@ -2,16 +2,17 @@
 
 Vue 3 + TypeScript + Spring Boot + MySQL 的 AI 应用生成工作台。界面参考 atoms.dev/zh/dashboard 的浅灰侧栏、居中创作区、圆角输入框与中性色布局。仅为现有功能调整样式，不包含参考站中的游戏、视频、积分或工具连接入口。
 
-## 快速体验（不需要 MySQL 和模型密钥）
+## 本地启动（MySQL 与 Temporal）
 
 环境：Java 21、Maven 3.8+、Node.js 20.19+。
 
 在项目根目录打开两个终端：
 
 ```bash
-# 终端一：文件型 H2 数据库 + 明确标注的模板演示
+# 终端一：启动 Temporal，配置 MySQL 和模型密钥，然后运行后端
+docker compose -p atoms-temporal -f deploy/compose.temporal.yml up -d --wait
 cd backend
-mvn spring-boot:run -Dspring-boot.run.profiles=local
+mvn spring-boot:run
 ```
 
 ```bash
@@ -23,14 +24,13 @@ npm run dev
 
 打开 http://127.0.0.1:5173 。前后端请始终使用同一个主机名，不混用 localhost 和 127.0.0.1，匿名项目依赖浏览器 Cookie。
 
-`local` 配置默认使用 H2 文件数据库（`backend/data/`）和演示模板；演示支持个人记账、任务看板、落地页，以及“暗色”“绿色”“蓝色”修改。其他描述只会选择内置模板，不代表 AI 理解或完成了任意需求。界面会持续标注演示模式。
+使用本机 Docker MySQL 时，确保容器映射了端口 3306、已创建 `atoms` 数据库，并按下节填写数据库和模型配置。
 
 ## MySQL 与真实模型
 
 本地真实配置在 `backend/config/application-private.yml`（已排除Git），可直接修改该文件：
 
 - `spring.datasource.url`、`username`、`password`：本地 MySQL 配置。
-- `atoms.demo`：使用真实模型时设为 `false`。
 - `atoms.model`：集中管理全部模型配置，包括文本地址与密钥、构建及对话模型选项，以及 `image` 子节点下的图像接口、密钥和模型选项。
 
 原有地址、密钥和数据库密码已保留在私有配置中。`backend/src/main/resources/application.yml` 仅保留可公开的默认项。无论从项目根目录或 backend 目录启动，都会自动加载私有配置。
@@ -48,9 +48,12 @@ mvn spring-boot:run
 
 阿里云百炼工作空间域名的兼容接口地址应包含 `/compatible-mode/v1`，例如 `https://<工作空间ID>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。代码会追加 `/chat/completions`。代码生成使用通用对话模型（当前配置为 `qwen-plus`），不要使用 `qwen-mt-lite` 等专用翻译模型。
 
-`application-local.yml` 仅用于 H2 + 内置模板演示；真实模型与 MySQL 启动时不要启用 `local` profile。模型密钥只在后端使用。
+模型密钥只在后端使用。
 
 ## 构建、对话、图像与模型切换
+
+数据库测试需要运行中的 Docker。测试会启动独立的 MySQL 8.4 容器，为各组测试创建隔离的数据库，并在测试进程退出时清理容器和数据卷。可用 `ATOMS_MYSQL_TEST_IMAGE` 指定本机已安装的兼容 MySQL 镜像。
+
 
 输入框下方可选择“构建应用 / 对话问答 / 图像生成”，并按模式切换模型。对话支持多轮上下文，图片可在项目内查看和下载；问答和生图不修改代码版本。现有阿里云 API Key 可在授权范围内复用，图像使用独立的原生接口，费用单独计量。
 
@@ -114,18 +117,22 @@ backend/src/main/java/dev/atoms/
   AtomsApplication.java         Spring Boot 入口
   web/                          HTTP 接口、健康检查与请求防护
   agent/                        任务编排、工具执行、模型调用与任务持久化
-    GenerationService.java      任务调度、暂停与恢复
-    AgentLoop.java              执行循环与检查点
-    pattern/                   ReAct、Reflection、DAG 策略与节点调度
-    tool/                      工具目录、参数协议、执行器与内置工具
-    model/                     模型客户端、响应解析与 HTTP 通信
-    persistence/               任务事务、检查点、步骤、DAG 节点与模型用量
+    runtime/                    任务执行、暂停恢复、Temporal、Research 和 Swarm
+    pattern/                    ReAct、Reflection、DAG 策略与节点调度
+    approval/                   任务级和工具级审批策略
+    schedule/                   定时任务定义、触发和入队
+    gateway/                    Gateway Agent 配置和工具校验
+    tool/                       工具注册、参数协议、执行器与内置工具
+    model/                      模型路由、客户端和供应商响应解析
+    network/                    工具访问外部网络时的地址校验
+    persistence/                任务事务、检查点、步骤、DAG 节点与模型用量
+    skill/                      技能加载和目录
   workspace/                    项目快照、记录查询、源码校验、ZIP 导出与离线模板
 backend/src/main/resources/      数据库schema与环境配置
 backend/compose.yml             可选的本地MySQL容器
 ```
 
-Shannon 模式的 Java 迁移范围、配置、执行流程及后续路线见 [Agent模式迁移](docs/Agent模式迁移.md)。当前使用 Java 实现，不依赖 Python、Go、Rust 或 Temporal 服务。
+Shannon 模式的 Java 迁移范围、配置、执行流程及后续路线见 [Agent模式迁移](docs/Agent模式迁移.md)。应用使用 Java 实现，默认通过 Temporal 调度任务。
 
 ### Agent Skills
 
@@ -282,13 +289,13 @@ ReAct 可通过 `SEARCH_DOCS` 读取本轮基准版本的相关片段。模板�
 
 设置 `atoms.memory.compression.enabled: true` 后，长项目对话可以在任务开始时压缩较早的成功记录。超过 20 轮成功记录，或历史达到约 24,000 字符且有足够轮次时，系统把最多 20 条较早记录交给当前文本模型摘要。摘要输出上限为 500 token，并计入任务模型预算。
 
-压缩成功后，模型仍收到最初需求、近期原文、语义召回和当前源码。摘要持久化到当前任务，暂停恢复与 Worker 重试会复用结果。摘要调用不可用时沿用原有历史裁剪。离线演示和图像任务不使用该步骤。
+压缩成功后，模型仍收到最初需求、近期原文、语义召回和当前源码。摘要持久化到当前任务，暂停恢复与 Worker 重试会复用结果。摘要调用不可用时沿用原有历史裁剪。图像任务不使用该步骤。
 
 ### 资料研究
 
 Vue 输入模式可选择「资料研究」。Gateway 可提交 `mode: "research"` 或 `context.force_research: true`。任务使用问答模型配置，可把问题拆成最多四个检索分支，并行查询本轮基准版本中的文档。报告按实际检索片段编号引用，来源清单由程序生成。计划、证据和报告分阶段保存，恢复时复用已完成节点。研究结果保存为消息。
 
-可设置 `atoms.research.reference-tool` 为已注册的网络只读工具名。该工具须接受名为 `query` 的字符串参数。研究任务使用现有工具权限和调用预算，离线演示只检索工作区。结构化工具可返回 `results` 数组，每条含 `url`、`title` 和 `snippet`。报告会保留有效 HTTPS 来源并按 URL 去重。纯文本连接器仍以工具名标记来源。当前未对来源可信度打分。
+可设置 `atoms.research.reference-tool` 为已注册的网络只读工具名。该工具须接受名为 `query` 的字符串参数。研究任务使用现有工具权限和调用预算。结构化工具可返回 `results` 数组，每条含 `url`、`title` 和 `snippet`。报告会保留有效 HTTPS 来源并按 URL 去重。纯文本连接器仍以工具名标记来源。当前未对来源可信度打分。
 
 Gateway 可用 `research_strategy: deep` 或 `academic` 默认启用最多三轮补充检索。可通过 `context.iterative_max_iterations` 设置轮数上限（1～5）。仅设置 `atoms.research.refinement.enabled: true` 时默认一轮。每轮最多追加两个新查询，没有新查询时提前汇总。轮数上限、覆盖检查和证据都保留检查点。
 
@@ -313,12 +320,14 @@ Gateway 可用 `research_strategy: deep` 或 `academic` 默认启用最多三轮
 ```bash
 docker compose -p atoms-temporal -f deploy/compose.temporal.yml up -d --wait
 cd backend
-mvn spring-boot:run -Dspring-boot.run.profiles=local -Dspring-boot.run.arguments=--atoms.temporal.enabled=true
+mvn spring-boot:run
 ```
 
 Temporal 监听本机 7233，Web UI 在本机 8233。Docker 命名卷保存开发服务器历史。后端可通过 `atoms.temporal.target`、`atoms.temporal.namespace` 和 `atoms.temporal.task-queue` 指向指定服务和队列。切换到 Temporal 前先停止连接同一个业务库的旧调度实例；使用同一个 Temporal 队列的 Atoms 实例需共享同一个业务库。
 
-启用后，每个 Atoms 任务 ID 对应一个 Temporal Workflow，执行逻辑在 Activity 中运行。Activity 重试时用新的执行令牌接管，旧令牌无法提交版本或检查点。暂停与审批状态仍以业务库为准。已保存的检查点会复用，中断时未确认的外部调用可能重发。
+Temporal 是默认执行器。服务端或命名空间不可用时，Atoms 不会自动改用本地执行器。仅在隔离开发和测试时可显式设置 `atoms.temporal.enabled: false`。生产 Compose 和 Railway 部署需将 `ATOMS_TEMPORAL_TARGET` 设置为应用可访问的 Temporal gRPC 地址，可用 `ATOMS_TEMPORAL_NAMESPACE` 和 `ATOMS_TEMPORAL_TASK_QUEUE` 指定命名空间和队列。部署使用独立的 Temporal 服务，本地 Compose 使用有持久卷的开发服务器。
+
+每个由 Atoms 自己执行的任务 ID 对应一个 Temporal Workflow，执行逻辑在 Activity 中运行。Activity 重试时用新的执行令牌接管，旧令牌无法提交版本或检查点。暂停与审批状态仍以业务库为准。已保存的检查点会复用，中断时未确认的外部调用可能重发。
 
 Gateway 的 `GET /api/v1/tasks/{id}/timeline` 读取 Temporal 历史，支持 `mode=summary|full` 与可选 `run_id`，仅返回事件类型、时间和序号。当前历史接口为只读。Research 的规划、证据检索、覆盖检查、补充检索和报告生成使用 `<task-queue>-research-evidence` 队列。主 Agent 的模型动作决策、普通构建 DAG 的规划与分析、模板顶层 simple 节点、模板认知策略的模型步骤，以及模板 DAG、Supervisor 和 Swarm 中的角色子任务使用 `<task-queue>-agents` 队列。新任务在主 Workflow 中启动原生子 Workflow，主历史记录子任务启动和结果，各子任务保留自己的 Workflow 和 Activity 历史。主任务用 Temporal 版本标记保留旧历史的独立 Workflow 执行路径，并使用业务库的节点检查点恢复。部署时应更新同一任务队列上的所有 Worker，再提交新任务。启用 Temporal 的应用默认启动三个队列的 Worker。可通过 `atoms.temporal.research-evidence-worker.enabled: false` 或 `atoms.temporal.agent-worker.enabled: false` 关闭某个实例上的对应 Worker，每个使用中的队列至少需要一个启用的实例。新构建任务由主 Workflow 推进 Agent 动作循环。每个 Activity 执行一次动作并保存检查点，Workflow 决定继续、等待控制操作或结束。暂停、恢复或取消在业务库提交后发送 Temporal Signal，唤醒正在等待的 Workflow，信号未送达时由定时复查兜底。工具执行保留在 Activity 中。模板顶层 DAG 也按就绪批次推进，每个 Activity 最多运行两个依赖已满足的顶层节点。Compose 中的 SQLite 开发服务器用于本地验证。
 
@@ -347,6 +356,12 @@ Supervisor 角色子任务支持 Temporal 子工作流及白名单内的只读�
 iframe 不是资源隔离容器，恶意死循环仍可能影响浏览器；“停止”只是卸载 iframe，并非可靠的 CPU 限制。公开运行任意生成代码前需增加独立预览域和执行资源隔离。
 
 字体通过 Google Fonts 加载，网络不可达时自动使用系统字体。没有使用官网私有资源或伪造上线、支付等能力。
+
+## 会话工作空间
+
+会话的「工作空间」可查看目录、预览和下载文本文件，并下载已生成的图片。自主执行（ReAct）中的 `WRITE_WORKSPACE_FILE` 可把报告、笔记等文本保存到 `artifacts/`，后续同会话任务可通过 `LIST_FILES` 和 `READ_FILE` 发现并读取。写入随会话持久化，任务暂停或终止后仍可查看。已有源码版本也可在文件列表中浏览，从「版本编辑」继续预览、手动修改及保存。
+
+当前文件通过 MySQL 保存。隔离验收容器内的临时文件独立于会话工作空间。
 
 ## 后端工程源码导出
 

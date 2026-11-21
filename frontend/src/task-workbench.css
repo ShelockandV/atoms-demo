@@ -233,3 +233,14 @@
 .atoms-task-app .composer-run-pause:hover:not(:disabled){background:var(--atoms-selected)}
 .atoms-task-app .composer-run-stop{background:#df0a22;border-color:#df0a22;color:#fff}
 .atoms-task-app .composer-run-stop:hover:not(:disabled){background:#bb0b1f;border-color:#bb0b1f}
+
+.session-workspace header>div{display:flex;align-items:center;gap:4px}
+.session-file-list{display:grid;gap:3px;padding:10px 0}
+.session-file-list button{display:flex;align-items:center;gap:8px;text-align:left;padding:7px 8px;border-radius:8px;overflow-wrap:anywhere}
+.session-file-list button svg{flex:none;color:var(--atoms-muted)}
+.session-file-list button:hover,.session-file-list button[aria-pressed=true]{background:var(--atoms-selected)}
+.session-file-preview{border:1px solid var(--atoms-line);border-radius:10px;margin:8px 0;overflow:hidden}
+.session-file-preview header{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 9px;background:var(--atoms-panel);overflow-wrap:anywhere}
+.session-file-preview pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:10px;font:12px/1.6 "Geist Mono",monospace}
+.session-image-files{display:flex;flex-wrap:wrap;gap:8px}
+.session-image-files img{width:72px;height:72px;object-fit:cover;border-radius:8px}

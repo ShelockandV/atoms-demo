@@ -6,6 +6,9 @@ services:
     restart: unless-stopped
     environment:
       SPRING_PROFILES_ACTIVE: production
+      ATOMS_TEMPORAL_TARGET: ${ATOMS_TEMPORAL_TARGET:?Set the Temporal service address reachable from the app container}
+      ATOMS_TEMPORAL_NAMESPACE: ${ATOMS_TEMPORAL_NAMESPACE:-default}
+      ATOMS_TEMPORAL_TASK_QUEUE: ${ATOMS_TEMPORAL_TASK_QUEUE:-atoms-generation}
       SPRING_CONFIG_ADDITIONAL_LOCATION: file:/app/config/
       JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=65
     volumes:

@@ -2,7 +2,7 @@ package dev.atoms.agent.pattern;
 
 import java.util.*;
 
-import dev.atoms.agent.AgentLoop.Decision;
+import dev.atoms.agent.runtime.AgentLoop.Decision;
 
 /**
  * 按策略 ID 查找对应的执行策略，并提供策略目录。

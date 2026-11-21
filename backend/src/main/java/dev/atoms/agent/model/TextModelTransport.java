@@ -86,8 +86,9 @@ public final class TextModelTransport {
                       int outputLimit, String traceId, LongConsumer reserve, Settlement recordUsage,
                       java.util.function.Consumer<String> publish) throws Exception {
         boolean stream = publish != null;
+        boolean synthesis = !stream && Boolean.TRUE.equals(options.get("atoms_synthesis"));
         if (key.isBlank())
-            throw new IllegalArgumentException("请在后端私有配置中配置 atoms.model.api-key 和 atoms.model.name，或设置 atoms.demo=true");
+            throw new IllegalArgumentException("请在后端私有配置中配置 atoms.model.api-key 和 atoms.model.name");
         int outputTokens = outputLimit == 0 ? maxOutputTokens : Math.min(maxOutputTokens, outputLimit);
         Object imageInput = options.get("atoms_images");
         if (imageInput != null && protocol != Protocol.OPENAI)
@@ -120,6 +121,7 @@ public final class TextModelTransport {
         }
         if (protocol == Protocol.OPENAI) {
             payload.remove("atoms_images");
+            payload.remove("atoms_synthesis");
             if (imageInput != null || toolHistory) {
                 var images = imageInput instanceof Map<?, ?> sources ? sources : Map.of();
                 var inputs = json.createArrayNode();
@@ -182,16 +184,16 @@ public final class TextModelTransport {
                     return result.message();
                 }
                 return decode(new String(input.readNBytes(2_000_001), java.nio.charset.StandardCharsets.UTF_8),
-                        estimated, recordUsage);
+                        estimated, recordUsage, 0);
             }
         }
         var response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() / 100 != 2)
             throw new ProviderFailure(response.statusCode(), ModelHttp.providerError(json, response.statusCode(), response.body()));
-        return decode(response.body(), estimated, recordUsage);
+        return decode(response.body(), estimated, recordUsage, synthesis ? outputTokens : 0);
     }
 
-    private JsonNode decode(String body, long estimated, Settlement recordUsage) {
+    private JsonNode decode(String body, long estimated, Settlement recordUsage, int synthesisLimit) {
         if (body.length() > 2_000_000) throw new IllegalArgumentException("模型响应过大");
         JsonNode root;
         try {
@@ -207,13 +209,24 @@ public final class TextModelTransport {
             case ANTHROPIC -> Set.of("max_tokens", "model_context_window_exceeded").contains(root.path("stop_reason").asText());
             case GEMINI -> "MAX_TOKENS".equals(choice.path("finishReason").asText());
         };
-        if (truncated)
+        if (truncated && synthesisLimit == 0)
             throw new IllegalStateException("模型输出达到长度上限，源码可能不完整。请缩小本次生成范围，或调整 atoms.model.max-output-tokens 后重试");
-        return switch (protocol) {
+        var message = switch (protocol) {
             case OPENAI -> choice.path("message");
             case ANTHROPIC -> AnthropicMessages.message(json, root);
             case GEMINI -> GeminiContent.message(json, choice);
         };
+        if (synthesisLimit > 0 && message instanceof com.fasterxml.jackson.databind.node.ObjectNode object) {
+            var usage = root.path(protocol == Protocol.GEMINI ? "usageMetadata" : "usage");
+            object.put("atoms_truncated", truncated);
+            object.put("atoms_output_limit", synthesisLimit);
+            object.put("atoms_output_tokens", usage.path(switch (protocol) {
+                case OPENAI -> "completion_tokens";
+                case ANTHROPIC -> "output_tokens";
+                case GEMINI -> "candidatesTokenCount";
+            }).asInt(-1));
+        }
+        return message;
     }
 
     static JsonNode functionArguments(ObjectMapper json, JsonNode call) throws com.fasterxml.jackson.core.JsonProcessingException {

@@ -1,4 +1,4 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
 
 
 
@@ -18,7 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -37,8 +36,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class ModelMeteringTest {
     @Test void workflowNodeBudgetsSettleIndependentlyAndSurviveResume() {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID()
-                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        var source = dev.atoms.MySqlTestDatabase.create();
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
         var db = new JdbcTemplate(source);
         var environment = new org.springframework.mock.env.MockEnvironment()
@@ -63,8 +61,7 @@ class ModelMeteringTest {
     }
 
     @Test void queuedSkillSurvivesPauseAndResume() {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID()
-                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        var source = dev.atoms.MySqlTestDatabase.create();
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
         var store = new Store(new JdbcTemplate(source), new TransactionTemplate(new DataSourceTransactionManager(source)),
                 new ObjectMapper());
@@ -82,8 +79,7 @@ class ModelMeteringTest {
     }
 
     @Test void tokenReservationsAreAtomicAndSettledCapacitySurvivesResume() {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID()
-                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        var source = dev.atoms.MySqlTestDatabase.create();
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
         var store = new Store(new JdbcTemplate(source), new TransactionTemplate(new DataSourceTransactionManager(source)),
                 new ObjectMapper());
@@ -136,8 +132,7 @@ class ModelMeteringTest {
     }
 
     @Test void toolWorkersShareOneCallLimitAndDagWorkersInheritAccounting() throws Exception {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID()
-                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        var source = dev.atoms.MySqlTestDatabase.create();
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
         var json = new ObjectMapper();
         var store = new Store(new JdbcTemplate(source), new TransactionTemplate(new DataSourceTransactionManager(source)), json);
@@ -204,8 +199,7 @@ class ModelMeteringTest {
     }
 
     @Test void httpCallsAreReservedBeforeSendAndBudgetSurvivesResume() throws Exception {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:" + UUID.randomUUID()
-                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        var source = dev.atoms.MySqlTestDatabase.create();
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(source);
         var json = new ObjectMapper();
         var store = new Store(new JdbcTemplate(source), new TransactionTemplate(new DataSourceTransactionManager(source)), json);

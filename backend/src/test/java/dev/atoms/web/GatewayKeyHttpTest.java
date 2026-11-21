@@ -17,22 +17,20 @@ import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@org.springframework.context.annotation.Import(dev.atoms.OfflineModelTestConfiguration.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "atoms.demo=true",
         "atoms.gateway.tenant-tokens.memory=memory-root", "atoms.memory.user-files.recall-enabled=true",
         "atoms.gateway.agents.files.name=Files", "atoms.gateway.agents.files.description=List workspace files",
         "atoms.gateway.agents.files.category=workspace", "atoms.gateway.agents.files.tool=LIST_FILES", "atoms.gateway.tenant-tokens.epsilon=epsilon-root", "atoms.gateway.tenant-tokens.alpha=alpha-root", "atoms.gateway.tenant-tokens.beta=beta-root",
         "atoms.gateway.tenant-tokens.gamma=gamma-root", "atoms.gateway.tenant-tokens.delta=delta-root", "atoms.gateway.rate-limit.requests-per-hour=24",
         "atoms.gateway.jwt.signing-key=jwt-signature-for-integration-tests-only", "atoms.gateway.jwt.audience=atoms-tests",
-        "spring.datasource.url=jdbc:h2:mem:gateway_keys;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-        "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
-        "spring.datasource.password=", "spring.sql.init.mode=always"
+        "spring.sql.init.mode=always"
 })
-class GatewayKeyHttpTest {
+class GatewayKeyHttpTest extends dev.atoms.MySqlTestDatabase {
     @LocalServerPort int port;
     @Autowired ObjectMapper json;
     @Autowired org.springframework.jdbc.core.JdbcTemplate db;
-    @Autowired dev.atoms.agent.ScheduledTasks schedules;
+    @Autowired dev.atoms.agent.schedule.ScheduledTasks schedules;
     @Autowired dev.atoms.agent.persistence.Store store;
     @org.junit.jupiter.api.io.TempDir static Path memoryRoot;
 

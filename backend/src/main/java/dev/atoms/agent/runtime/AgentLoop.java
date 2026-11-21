@@ -1,4 +1,6 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
+
+import dev.atoms.agent.approval.TaskApprovalPolicy;
 
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.persistence.Store;
@@ -193,17 +195,22 @@ public final class AgentLoop {
 
     private Decision decideWithRuntime(String rid, String owner, String token, String prompt, String plan,
                                        ProjectContext context, Snapshot state, String selectedModel) throws Exception {
-        if (temporal == null || model.isDemo())
-            return chooseAction(model, prompt, plan, context, state, settings, selectedModel);
+        if (model.isDemo()) return offlineDecision(state);
         var runtime = new ToolInvocation(store, model, settings, rid, owner, token, prompt, plan, context, selectedModel, state);
+        var inputSnapshot = actionInput(state, runtime.workspace().keySet(), settings);
+        if (temporal == null) return decide(model, prompt, plan, context, inputSnapshot, selectedModel);
         var input = new TemporalTaskRuntime.AgentNodeInput(rid, token, null, 0,
-                "build.agent-decision." + state.step(), null, store.encode(actionInput(state, context, settings)),
+                "build.agent-decision." + state.step(), null, store.encode(inputSnapshot),
                 Map.of(), plan, null);
         return model.json().readValue(temporal.agentNode(runtime, input), Decision.class);
     }
 
     private static ModelClient.ActionInput actionInput(Snapshot state, ProjectContext project, AgentSettings settings) {
-        return new ModelClient.ActionInput(workspace(state, project).keySet(), state.step(), settings.maxSteps(),
+        return actionInput(state, workspace(state, project).keySet(), settings);
+    }
+
+    private static ModelClient.ActionInput actionInput(Snapshot state, java.util.Set<String> paths, AgentSettings settings) {
+        return new ModelClient.ActionInput(paths, state.step(), settings.maxSteps(),
                 state.generations(), settings.maxGenerations(), !state.files().isEmpty(), state.validated(),
                 settings.requireReview(), state.reviewed(), state.observations());
     }

@@ -1,4 +1,6 @@
-package dev.atoms.agent;
+package dev.atoms.agent.runtime;
+
+import dev.atoms.agent.schedule.ScheduledTasks;
 
 import dev.atoms.agent.persistence.Store;
 import dev.atoms.agent.pattern.WorkflowTemplate;
@@ -62,7 +64,7 @@ import java.util.concurrent.TimeUnit;
 
 /** Persists one Temporal workflow per accepted Atoms run. */
 @Component
-@ConditionalOnProperty(name = "atoms.temporal.enabled", havingValue = "true")
+@ConditionalOnProperty(name = "atoms.temporal.enabled", havingValue = "true", matchIfMissing = true)
 public class TemporalTaskRuntime {
     private final Store store;
     private final WorkflowServiceStubs service;
@@ -395,7 +397,7 @@ public class TemporalTaskRuntime {
         }
     }
 
-    Instant syncSchedule(String id, String version, String cron, String zone, String status) {
+    public Instant syncSchedule(String id, String version, String cron, String zone, String status) {
         String scheduleId = "atoms-schedule-" + id;
         var handle = scheduleClient.getHandle(scheduleId);
         if ("DELETED".equals(status)) {

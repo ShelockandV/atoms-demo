@@ -2,7 +2,7 @@ package dev.atoms.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
-import dev.atoms.agent.ScheduledTasks;
+import dev.atoms.agent.schedule.ScheduledTasks;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,13 +26,12 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@org.springframework.context.annotation.Import(dev.atoms.OfflineModelTestConfiguration.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "atoms.demo=true", "atoms.approval.environment=test",
-        "spring.datasource.url=jdbc:h2:mem:opa_http;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-        "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
-        "spring.datasource.password=", "spring.sql.init.mode=always"
+        "atoms.approval.environment=test",
+        "spring.sql.init.mode=always"
 })
-class TaskApprovalHttpTest {
+class TaskApprovalHttpTest extends dev.atoms.MySqlTestDatabase {
     @LocalServerPort int port;
     @Autowired ObjectMapper json;
     @Autowired JdbcTemplate db;
