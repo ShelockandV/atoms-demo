@@ -12,6 +12,7 @@ import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.*;
 import java.util.Locale;
 import java.util.function.Predicate;
@@ -25,50 +26,146 @@ public final class PublicHttps {
     /** 返回已限制大小的响应体及其媒体类型。 */
     public record Download(byte[] bytes, String mediaType) {}
 
+    @FunctionalInterface
+    public interface EventStreamResponse {
+        byte[] read(InputStream body, int maxBytes) throws IOException;
+    }
+
     private PublicHttps() {}
 
     public static Download get(URI uri, Predicate<String> allowedHost, int maxBytes) throws IOException {
-        return exchange(new HttpGet(uri), allowedHost, maxBytes, false);
+        return exchange(new HttpGet(uri), allowedHost, maxBytes, null);
     }
 
     public static Download callMcpTool(URI uri, Predicate<String> allowedHost, byte[] payload,
-                                       String tool, int maxBytes) throws IOException {
-        if (payload.length > 32_768 || !tool.matches("[A-Za-z0-9_.-]{1,128}"))
+                                       String tool, int maxBytes, EventStreamResponse sse) throws IOException {
+        return callMcp(uri, allowedHost, payload, "tools/call", tool, "", maxBytes, sse);
+    }
+
+    public static Download callMcp(URI uri, Predicate<String> allowedHost, byte[] payload,
+                                   String method, String tool, String token, int maxBytes, EventStreamResponse sse) throws IOException {
+        if (payload.length > 32_768 || !tool.matches("[A-Za-z0-9_.-]{0,128}")
+                || (!"tools/call".equals(method) && !"tools/list".equals(method)))
             throw new IllegalArgumentException("MCP 请求参数超过限制");
         var request = new HttpPost(uri);
         request.setHeader("Accept", "application/json, text/event-stream");
         request.setHeader("MCP-Protocol-Version", "2026-07-28");
-        request.setHeader("Mcp-Method", "tools/call");
-        request.setHeader("Mcp-Name", tool);
+        request.setHeader("Mcp-Method", method);
+        if (!tool.isEmpty()) request.setHeader("Mcp-Name", tool);
+        authorize(request, token);
         request.setEntity(new ByteArrayEntity(payload, ContentType.APPLICATION_JSON));
-        return exchange(request, allowedHost, maxBytes, true);
+        return exchange(request, allowedHost, maxBytes, java.util.Objects.requireNonNull(sse));
     }
 
-    private static Download exchange(HttpUriRequestBase request, Predicate<String> allowedHost, int maxBytes, boolean jsonOnly)
+    public static Download oauthToken(URI uri, String form, String authorization) throws IOException {
+        var request = new HttpPost(uri);
+        request.setHeader("Accept", "application/json");
+        request.setHeader("Authorization", authorization);
+        request.setEntity(new org.apache.hc.core5.http.io.entity.StringEntity(form, ContentType.APPLICATION_FORM_URLENCODED));
+        return exchange(request, uri.getHost()::equalsIgnoreCase, 16_384, null);
+    }
+
+    @FunctionalInterface
+    public interface LegacyConversation<T> {
+        T exchange(InputStream stream, LegacyPost post) throws IOException;
+    }
+
+    @FunctionalInterface
+    public interface LegacyPost {
+        void send(String path, byte[] message) throws IOException;
+    }
+
+    public static <T> T legacyMcp(URI uri, String token, LegacyConversation<T> conversation) throws IOException {
+        var request = new HttpGet(uri);
+        request.setHeader("Accept", "text/event-stream");
+        authorize(request, token);
+        try (var client = client(uri, uri.getHost()::equalsIgnoreCase)) {
+            return client.execute(request, response -> {
+                var entity = response.getEntity();
+                if (response.getCode() != 200 || entity == null || !"text/event-stream".equals(mediaType(entity.getContentType()))) {
+                    request.cancel();
+                    throw new IOException("旧版 MCP 端点未建立 SSE 连接");
+                }
+                try (var stream = entity.getContent()) {
+                    try {
+                        return conversation.exchange(stream, (path, message) -> {
+                            URI target = legacyTarget(uri, path);
+                            if (message.length > 32_768) throw new IOException("MCP 请求过大");
+                            var post = new HttpPost(target);
+                            authorize(post, token);
+                            post.setEntity(new ByteArrayEntity(message, ContentType.APPLICATION_JSON));
+                            client.execute(post, reply -> {
+                                int code = reply.getCode();
+                                post.cancel();
+                                if (code < 200 || code >= 300) throw new IOException("旧版 MCP 消息发送失败");
+                                return null;
+                            });
+                        });
+                    } finally {
+                        request.cancel();
+                    }
+                }
+            });
+        }
+    }
+
+    static URI legacyTarget(URI source, String path) throws IOException {
+        try {
+            URI target = source.resolve(path);
+            validateEndpoint(target, source.getHost()::equalsIgnoreCase);
+            if (path.length() > 2048 || target.getRawPath() == null || target.getRawPath().isEmpty())
+                throw new IOException("旧版 MCP 消息端点无效");
+            return target;
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("旧版 MCP 消息端点须与 SSE 端点同源", invalid);
+        }
+    }
+
+    private static void authorize(HttpUriRequestBase request, String token) {
+        if (!token.isEmpty()) request.setHeader("Authorization", "Bearer " + token);
+    }
+
+    private static String mediaType(String contentType) {
+        return contentType == null ? "" : contentType.split(";", 2)[0].strip().toLowerCase(Locale.ROOT);
+    }
+
+    private static org.apache.hc.client5.http.impl.classic.CloseableHttpClient client(URI uri, Predicate<String> allowedHost)
             throws IOException {
-        if (maxBytes < 1 || maxBytes > 8_000_000) throw new IllegalArgumentException("读取大小上限无效");
-        URI uri;
-        try { uri = request.getUri(); }
-        catch (URISyntaxException e) { throw new IllegalArgumentException("公网请求地址无效", e); }
         var dns = pin(uri, allowedHost, InetAddress::getAllByName);
         var connections = PoolingHttpClientConnectionManagerBuilder.create().setDnsResolver(dns)
                 .setDefaultConnectionConfig(ConnectionConfig.custom()
                         .setConnectTimeout(Timeout.ofSeconds(10)).setSocketTimeout(Timeout.ofSeconds(20)).build())
                 .build();
-        try (var client = HttpClients.custom().setConnectionManager(connections)
-                .disableRedirectHandling().disableAutomaticRetries().disableCookieManagement()
-                .disableContentCompression().build()) {
+        return HttpClients.custom().setConnectionManager(connections).disableRedirectHandling()
+                .disableAutomaticRetries().disableCookieManagement().disableContentCompression().build();
+    }
+
+    private static Download exchange(HttpUriRequestBase request, Predicate<String> allowedHost, int maxBytes, EventStreamResponse sse)
+            throws IOException {
+        if (maxBytes < 1 || maxBytes > 8_000_000) throw new IllegalArgumentException("读取大小上限无效");
+        URI uri;
+        try { uri = request.getUri(); }
+        catch (URISyntaxException e) { throw new IllegalArgumentException("公网请求地址无效", e); }
+        try (var client = client(uri, allowedHost)) {
             return client.execute(request, response -> {
                 if (response.getCode() != 200 || response.getEntity() == null) {
                     request.cancel();
                     throw new IOException("公网下载未返回可用响应（HTTP " + response.getCode() + "）");
                 }
                 var entity = response.getEntity();
-                String contentType = entity.getContentType();
-                String type = contentType == null ? "" : contentType.split(";", 2)[0].strip().toLowerCase(Locale.ROOT);
-                if (jsonOnly && !"application/json".equals(type)) {
+                String type = mediaType(entity.getContentType());
+                if (sse != null && "text/event-stream".equals(type)) {
+                    try (var body = entity.getContent()) {
+                        try {
+                            return new Download(sse.read(body, maxBytes), "application/json");
+                        } finally {
+                            request.cancel();
+                        }
+                    }
+                }
+                if (sse != null && !"application/json".equals(type)) {
                     request.cancel();
-                    throw new IllegalArgumentException("当前 MCP 工具仅支持单条 JSON 响应");
+                    throw new IllegalArgumentException("MCP 响应须为 JSON 或 SSE");
                 }
                 try (var body = entity.getContent()) {
                     var bytes = body.readNBytes(maxBytes + 1);

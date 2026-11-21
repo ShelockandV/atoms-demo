@@ -1,0 +1,11 @@
+ARG MAVEN_ACCEPTANCE_IMAGE=atoms-acceptance-maven:local
+ARG BROWSER_ACCEPTANCE_IMAGE=atoms-acceptance-browser:local
+FROM ${MAVEN_ACCEPTANCE_IMAGE} AS build
+FROM ${BROWSER_ACCEPTANCE_IMAGE}
+COPY --from=build /opt/java/openjdk /opt/java/openjdk
+COPY --from=build /usr/share/maven /usr/share/maven
+COPY --from=build /opt/atoms-repository /opt/atoms-repository
+COPY --from=build /opt/atoms/LoopbackProbe.java /opt/atoms/LoopbackProbe.java
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH=/opt/java/openjdk/bin:/usr/share/maven/bin:$PATH
+COPY deploy/acceptance/joint.cjs /opt/atoms/joint.cjs

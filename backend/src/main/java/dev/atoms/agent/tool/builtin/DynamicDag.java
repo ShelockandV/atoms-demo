@@ -26,12 +26,28 @@ final class DynamicDag {
         return executor.execute(nodes, context, 2).get(SUMMARY);
     }
 
+    record PlannedNode(String id, String task, String editTask, List<String> dependencies) {}
+
     static List<DagExecutor.Node> parse(String proposal, ToolContext context) {
+        var nodes = new ArrayList<DagExecutor.Node>();
+        for (var planned : parsePlan(proposal)) {
+            String nodeId = "v2.analysis." + planned.id();
+            nodes.add(new DagExecutor.Node(nodeId, planned.dependencies().stream().map(id -> "v2.analysis." + id).toList(),
+                    outputs -> context.analyze(nodeId, "只返回项目分析与验收建议：\n" + planned.task()
+                            + "\n依赖节点输出：\n" + context.encode(outputs))));
+        }
+        var inputs = nodes.stream().map(DagExecutor.Node::id).toList();
+        nodes.add(new DagExecutor.Node(SUMMARY, inputs, outputs ->
+                context.analyze("synthesis", "汇总实现约束和验收清单：\n" + context.encode(outputs))));
+        return List.copyOf(nodes);
+    }
+
+    static List<PlannedNode> parsePlan(String proposal) {
         try {
             var list = JSON.readTree(proposal);
             if (list == null || !list.isArray() || list.isEmpty() || list.size() > 5)
                 throw new IllegalArgumentException("DAG 计划必须包含 1～5 个分析节点");
-            var nodes = new ArrayList<DagExecutor.Node>();
+            var nodes = new ArrayList<PlannedNode>();
             for (var entry : list) {
                 var id = entry.path("id");
                 var task = entry.path("task");
@@ -43,16 +59,14 @@ final class DynamicDag {
                 var parents = new ArrayList<String>();
                 for (var dependency : dependencies) {
                     if (!dependency.isTextual()) throw new IllegalArgumentException("DAG 依赖必须是节点标识");
-                    parents.add("v2.analysis." + dependency.textValue());
+                    parents.add(dependency.textValue());
                 }
-                String nodeId = "v2.analysis." + id.textValue();
-                nodes.add(new DagExecutor.Node(nodeId, parents, outputs ->
-                        context.analyze(nodeId, "只返回项目分析与验收建议：\n" + task.textValue()
-                                + "\n依赖节点输出：\n" + context.encode(outputs))));
+                var edit = entry.get("editTask");
+                if (edit != null && (!edit.isTextual() || edit.asText().isBlank() || edit.asText().length() > 400))
+                    throw new IllegalArgumentException("DAG 源码任务描述无效");
+                nodes.add(new PlannedNode(id.textValue(), task.textValue(),
+                        edit == null ? task.textValue() : edit.textValue(), List.copyOf(parents)));
             }
-            var inputs = nodes.stream().map(DagExecutor.Node::id).toList();
-            nodes.add(new DagExecutor.Node(SUMMARY, inputs, outputs ->
-                    context.analyze("synthesis", "汇总实现约束和验收清单：\n" + context.encode(outputs))));
             return List.copyOf(nodes);
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("DAG 计划必须是合法 JSON 数组", e);

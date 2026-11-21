@@ -22,7 +22,37 @@ public class IsolatedAcceptance {
             jar xf /work/source.zip
             [ -d /opt/atoms-repository ] || exit 126
             cp -R /opt/atoms-repository /work/repository || exit 126
-            exec mvn -B -o -ntp -Djansi.tmpdir=/work -Dmaven.repo.local=/work/repository test
+            if [ -z "$1" ]; then
+              exec mvn -B -o -ntp -Djansi.tmpdir=/work -Dmaven.repo.local=/work/repository test
+            fi
+            [ -f /opt/atoms/LoopbackProbe.java ] || exit 126
+            mvn -B -o -ntp -Djansi.tmpdir=/work -Dmaven.repo.local=/work/repository package
+            app=
+            for candidate in target/*.jar; do
+              [ -f "$candidate" ] || continue
+              jar tf "$candidate" > /work/jar-entries
+              if grep -q '^BOOT-INF/classes/' /work/jar-entries; then
+                if [ -n "$app" ]; then
+                  echo 'Multiple Spring Boot executable JARs were generated.'
+                  exit 1
+                fi
+                app="$candidate"
+              fi
+            done
+            if [ -z "$app" ]; then
+              echo 'Spring Boot executable JAR missing. Configure spring-boot:repackage.'
+              exit 1
+            fi
+            java -Xmx384m -Djava.io.tmpdir=/tmp -jar "$app" --server.address=127.0.0.1 --server.port=18080 > /work/app.log 2>&1 &
+            app_pid=$!
+            trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+            if ! java -Xmx128m /opt/atoms/LoopbackProbe.java "$app_pid" "$1"; then
+              tail -c 4096 /work/app.log
+              exit 1
+            fi
+            if [ -n "$2" ]; then
+              node /opt/atoms/joint.cjs "$2"
+            fi
             """;
     private static final String BROWSER = """
             set -eu
@@ -33,11 +63,33 @@ public class IsolatedAcceptance {
             """;
     private final String mavenImage;
     private final String browserImage;
+    private final String bootProbePath;
+    private final String jointImage;
+    private final String jointScenario;
 
+    public IsolatedAcceptance(String mavenImage, String browserImage) {
+        this(mavenImage, browserImage, "");
+    }
+
+    public IsolatedAcceptance(String mavenImage, String browserImage, String bootProbePath) {
+        this(mavenImage, browserImage, bootProbePath, "", "");
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
     public IsolatedAcceptance(@Value("${atoms.agent.acceptance.maven-image:}") String mavenImage,
-                              @Value("${atoms.agent.acceptance.browser-image:}") String browserImage) {
+                              @Value("${atoms.agent.acceptance.browser-image:}") String browserImage,
+                              @Value("${atoms.agent.acceptance.spring-boot-http-path:}") String bootProbePath,
+                              @Value("${atoms.agent.acceptance.joint-image:}") String jointImage,
+                              @Value("${atoms.agent.acceptance.joint-scenario:}") String jointScenario) {
+        if (!bootProbePath.isBlank() && (!bootProbePath.matches("/[A-Za-z0-9/_-]{0,199}") || bootProbePath.startsWith("//")))
+            throw new IllegalArgumentException("Spring Boot 验收路径须为站内 HTTP 路径");
+        this.bootProbePath = bootProbePath.strip();
         this.mavenImage = imageName(mavenImage);
         this.browserImage = imageName(browserImage);
+        this.jointImage = imageName(jointImage);
+        this.jointScenario = jointScenario;
+        if (!this.jointImage.isEmpty() && (this.bootProbePath.isEmpty() || jointScenario.isBlank() || jointScenario.length() > 4096))
+            throw new IllegalArgumentException("联合验收需要配置 Spring Boot 探针和联合场景");
     }
 
     private static String imageName(String configured) {
@@ -49,20 +101,28 @@ public class IsolatedAcceptance {
 
     public String verify(Map<String, String> files) throws Exception {
         var results = new ArrayList<String>();
+        boolean boot = !bootProbePath.isEmpty() && files.getOrDefault("pom.xml", "")
+                .contains("<artifactId>spring-boot-maven-plugin</artifactId>");
+        if (boot && !jointImage.isEmpty()) {
+            run(SourceFiles.zip(files), jointImage, BUILD, "前后端联合验收", bootProbePath, jointScenario);
+            return "隔离编译与测试、Spring Boot 启动和浏览器联合交互检查通过。";
+        }
         if (!mavenImage.isEmpty() && files.containsKey("pom.xml")) {
-            run(SourceFiles.zip(files), mavenImage, BUILD, "Maven 编译或测试", "");
-            results.add("隔离 Maven 编译与测试阶段通过。");
+            run(SourceFiles.zip(files), mavenImage, BUILD, boot ? "Spring Boot 启动与 HTTP 检查" : "Maven 编译或测试",
+                    boot ? bootProbePath : "", "");
+            results.add(boot ? "隔离 Maven 编译与测试、Spring Boot 启动和 HTTP 检查通过。"
+                    : "隔离 Maven 编译与测试阶段通过。");
         }
         if (!browserImage.isEmpty() && SourceFiles.canPreview(files)) {
             String entry = files.containsKey("index.html") ? "index.html" : files.keySet().stream()
                     .filter(path -> path.endsWith("/index.html")).findFirst().orElseThrow();
-            run(SourceFiles.zip(files), browserImage, BROWSER, "Chromium 页面冒烟检查", entry);
+            run(SourceFiles.zip(files), browserImage, BROWSER, "Chromium 页面冒烟检查", entry, "");
             results.add("隔离 Chromium 页面加载检查通过。");
         }
         return String.join(" ", results);
     }
 
-    private void run(byte[] archive, String image, String script, String label, String entry) throws Exception {
+    private void run(byte[] archive, String image, String script, String label, String entry, String scenario) throws Exception {
         String name = "atoms-acceptance-" + UUID.randomUUID();
         var command = List.of("docker", "run", "--rm", "-i", "--pull=never", "--log-driver=none", "--name", name,
                 "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
@@ -70,7 +130,7 @@ public class IsolatedAcceptance {
                 "--tmpfs", "/work:rw,exec,nosuid,nodev,size=512m,mode=1777",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
                 "--env", "HOME=/work", "--env", "MAVEN_CONFIG=/work/.m2", "--entrypoint", "/bin/sh",
-                image, "-c", script, "atoms-acceptance", entry);
+                image, "-c", script, "atoms-acceptance", entry, scenario);
         Process process;
         try {
             process = new ProcessBuilder(command).redirectErrorStream(true).start();

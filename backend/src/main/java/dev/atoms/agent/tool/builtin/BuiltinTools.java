@@ -83,6 +83,12 @@ public final class BuiltinTools {
                             if (content == null) throw new IllegalArgumentException("工作区不存在该文件：" + path);
                             return "文件 " + path + "：\n" + clip(content, 8000);
                         }),
+                tool("SEARCH_DOCS", "在本轮基准版本的文本与 Markdown 文档中检索片段，返回文件路径及字符范围。",
+                        "workspace", 30, List.of(new ToolParameter("query", ToolParameter.Type.STRING, "要查找的短语或关键词",
+                                true, 200, List.of())), (c, args) -> {
+                            c.stage("INSPECTING");
+                            return c.searchDocuments((String) args.get("query"));
+                        }),
                 tool("GENERATE", "根据需求生成完整源码快照，或根据候选源码和工具反馈修复。生成后必须重新校验和复核。",
                         "development", 1800, List.of(), (c, args) -> {
                             if (c.generations() >= c.maxGenerations())
@@ -96,7 +102,12 @@ public final class BuiltinTools {
                                     .filter(node -> Set.of("v1.synthesis", DynamicDag.SUMMARY).contains(node.get("id"))
                                             && "SUCCEEDED".equals(node.get("status")))
                                     .map(node -> "\nDAG 开发约束：" + node.get("output")).findFirst().orElse("");
-                            c.files(c.generate(constraints + candidate));
+                            String dynamicPlan = c.nodes().stream()
+                                    .filter(node -> DynamicDag.PLAN.equals(node.get("id")) && "SUCCEEDED".equals(node.get("status")))
+                                    .map(node -> (String) node.get("output")).findFirst().orElse("");
+                            if (c.generations() == 1 && c.files().isEmpty() && c.dynamicDagEditsEnabled() && !dynamicPlan.isBlank())
+                                c.files(DagSourceEdits.generate(c, constraints, dynamicPlan));
+                            else c.files(c.generate(constraints + candidate));
                             return "源码生成完成，共 " + c.files().size() + " 个文件；尚未校验，请执行 VALIDATE。";
                         }),
                 tool("VALIDATE", "检查候选源码，按配置运行隔离 Maven 测试或浏览器冒烟检查。", "quality", 205,

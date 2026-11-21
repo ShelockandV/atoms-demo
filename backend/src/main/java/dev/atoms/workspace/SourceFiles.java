@@ -23,6 +23,14 @@ public final class SourceFiles {
                 || files.keySet().stream().filter(name -> name.endsWith("/index.html")).count() == 1);
     }
 
+    public static void validatePath(String path) {
+        if (path == null || path.isBlank() || path.length() > 240 || path.startsWith("/") || path.contains("\\") || path.contains(":") || path.codePoints().anyMatch(Character::isISOControl))
+            throw new IllegalArgumentException("源码路径无效：请使用相对路径和正斜杠");
+        for (String part : path.split("/", -1))
+            if (part.isBlank() || part.equals(".") || part.equals(".."))
+                throw new IllegalArgumentException("源码路径不能包含空目录、. 或 ..");
+    }
+
     public static void validate(Map<String, String> files) {
         if (files == null || files.isEmpty() || files.size() > 80)
             throw new IllegalArgumentException("一个版本须包含1～80个源码文件");
@@ -31,11 +39,7 @@ public final class SourceFiles {
         boolean nonEmpty = false;
         for (var entry : files.entrySet()) {
             String path = entry.getKey(), content = entry.getValue();
-            if (path == null || path.isBlank() || path.length() > 240 || path.startsWith("/") || path.contains("\\") || path.contains(":") || path.codePoints().anyMatch(Character::isISOControl))
-                throw new IllegalArgumentException("源码路径无效：请使用相对路径和正斜杠");
-            for (String part : path.split("/", -1))
-                if (part.isBlank() || part.equals(".") || part.equals(".."))
-                    throw new IllegalArgumentException("源码路径不能包含空目录、. 或 ..");
+            validatePath(path);
             if (!paths.add(path.toLowerCase(Locale.ROOT)))
                 throw new IllegalArgumentException("存在仅大小写不同的重复文件路径");
             if (content == null || content.length() > 200_000)

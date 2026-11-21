@@ -1,9 +1,11 @@
 ARG MAVEN_IMAGE=maven:3.9-eclipse-temurin-21
 FROM ${MAVEN_IMAGE}
+COPY deploy/acceptance/LoopbackProbe.java /opt/atoms/LoopbackProbe.java
 COPY --chown=65532:65532 backend/pom.xml /opt/atoms-warmup/pom.xml
 RUN --mount=type=cache,id=atoms-acceptance-maven,target=/root/.m2/repository \
-    mkdir -p /opt/atoms-warmup/src/test/java \
+    mkdir -p /opt/atoms-warmup/src/main/java /opt/atoms-warmup/src/test/java \
+    && printf '%s\n' 'class WarmupApp { public static void main(String[] args) {} }' > /opt/atoms-warmup/src/main/java/WarmupApp.java \
     && printf '%s\n' 'class WarmupTest { @org.junit.jupiter.api.Test void warm() {} }' > /opt/atoms-warmup/src/test/java/WarmupTest.java \
-    && mvn -B -ntp -f /opt/atoms-warmup/pom.xml test \
+    && mvn -B -ntp -f /opt/atoms-warmup/pom.xml package \
     && cp -R /root/.m2/repository /opt/atoms-repository \
     && chmod -R a+rX /opt/atoms-repository

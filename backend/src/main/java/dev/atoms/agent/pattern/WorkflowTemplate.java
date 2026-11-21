@@ -50,9 +50,9 @@ public record WorkflowTemplate(String name, String description, String version, 
                 throw new IllegalArgumentException("模板节点 ID 无效");
             dependsOn = dependsOn == null ? List.of() : List.copyOf(dependsOn);
             toolsAllowlist = toolsAllowlist == null ? List.of() : List.copyOf(toolsAllowlist);
-            if (!Set.of("READ_FILE", "LIST_FILES").containsAll(toolsAllowlist)
+            if (!Set.of("READ_FILE", "LIST_FILES", "SEARCH_DOCS").containsAll(toolsAllowlist)
                     || new HashSet<>(toolsAllowlist).size() != toolsAllowlist.size())
-                throw new IllegalArgumentException("模板工具白名单仅支持 READ_FILE 和 LIST_FILES，且不可重复");
+                throw new IllegalArgumentException("模板工具白名单仅支持 READ_FILE、LIST_FILES 和 SEARCH_DOCS，且不可重复");
             if (budgetMax != null && budgetMax < 0) throw new IllegalArgumentException("节点预算不能为负数");
         }
 
@@ -152,10 +152,13 @@ public record WorkflowTemplate(String name, String description, String version, 
                 throw new IllegalArgumentException("分析角色名称无效");
         }
 
-        String instructions() {
-            String task = java.util.stream.Stream.of(description, query, prompt)
+        public String goal() {
+            return java.util.stream.Stream.of(description, query, prompt)
                     .filter(value -> value != null && !value.isBlank()).findFirst().orElse("");
-            return role == null ? task : "分析角色：" + role + "\n" + task;
+        }
+
+        String instructions() {
+            return role == null ? goal() : "分析角色：" + role + "\n" + goal();
         }
     }
 

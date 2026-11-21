@@ -40,4 +40,14 @@ class PublicHttpsTest {
                     host -> host.endsWith(".aliyuncs.com"), host -> { throw new AssertionError("不得查询 DNS"); }));
         }
     }
+    @org.junit.jupiter.api.Test
+    void legacySseMessageTargetRemainsOnThePinnedHttpsOrigin() throws Exception {
+        var source = java.net.URI.create("https://docs.example.com/sse");
+        org.junit.jupiter.api.Assertions.assertEquals("https://docs.example.com/messages?sessionId=known",
+                PublicHttps.legacyTarget(source, "/messages?sessionId=known").toString());
+        for (String invalid : java.util.List.of("//other.example.com/messages", "http://docs.example.com/messages",
+                "https://docs.example.com:444/messages", "/messages#fragment")) {
+            org.junit.jupiter.api.Assertions.assertThrows(java.io.IOException.class, () -> PublicHttps.legacyTarget(source, invalid));
+        }
+    }
 }

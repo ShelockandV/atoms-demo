@@ -88,7 +88,10 @@ class PauseResumeTest {
   assertTrue(store.versionFiles((String)store.project(pid,owner).get("current_version")).get("index.html").contains("checkpoint result"));
  }
 
- @Test void templateRunResumesFromCompletedNodeWithoutReplanning(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory)
+ @org.junit.jupiter.params.ParameterizedTest
+ @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+ void templateRunResumesFromCompletedNodeWithoutReplanning(boolean approved,
+         @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory)
          throws Exception {
   java.nio.file.Files.writeString(directory.resolve("review.yaml"), """
           name: review
@@ -136,6 +139,7 @@ class PauseResumeTest {
   assertThrows(IllegalArgumentException.class, () -> catalog.route("child", "9.0.0", true));
   assertEquals(6000, template.budgetFor(template.nodes().getFirst()));
   assertEquals(3000, template.budgetFor(template.nodes().getLast()));
+  service.cancel(rid, owner);
   pid = (String) store.create(owner, "模板恢复测试").get("id");
   rid = (String) store.queue(pid, owner, "生成页面", null, "build", "test-model",
           "reflection", null, template).get("id");
@@ -176,8 +180,26 @@ class PauseResumeTest {
   };
   model.generations.set(1);
   service = new GenerationService(store, model, mock(ImageClient.class));
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "toolApprovalPolicy",
+          new TaskApprovalPolicy(json, "", "dev", 0, "", "LIST_FILES"));
   service.recover();
   service.resume(rid, owner);
+  assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+   while (!"AWAITING_APPROVAL".equals(status())) Thread.sleep(20);
+  });
+  var pending = store.run(rid, owner);
+  assertEquals("summary.combine", pending.get("approvalNode"));
+  assertEquals("LIST_FILES", pending.get("approvalTool"));
+  assertEquals(1, calls.size(), "工具选择完成后应等待审批");
+  service.approve(rid, owner, approved, (String) pending.get("approvalId"));
+  if (!approved) {
+   assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+    while (!"FAILED".equals(status())) Thread.sleep(20);
+   });
+   assertEquals("节点工具调用未获批准", store.run(rid, owner).get("error"));
+   assertEquals(1, calls.size(), "拒绝后应停止该节点");
+   return;
+  }
   awaitSuccess();
   assertTrue(calls.getFirst().startsWith("role.tools."));
   assertEquals(List.of("summary.combine", "summary.combine"), calls.subList(1, calls.size()));
@@ -188,6 +210,391 @@ class PauseResumeTest {
           "reflection", null, template).get("id");
   assertEquals("FAILED", service.approve(rejected, owner, false).get("status"));
   assertDoesNotThrow(() -> store.queue(pid, owner, "可以提交新任务", version, "build", "test-model"));
+ }
+
+ @Test void swarmReplansUsingLateInputAndResumesNewRoleWithoutRepeatingLead(
+         @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+  java.nio.file.Files.writeString(directory.resolve("replan.yml"), """
+          name: replan-swarm
+          version: 1.0.0
+          nodes:
+            - id: team
+              type: swarm
+          """);
+  var template = new WorkflowTemplates(directory.toString()).route("replan-swarm", null, true);
+  service.cancel(rid, owner);
+  service.stop();
+  String prompt = "构建验收看板";
+  rid = (String) store.queue(pid, owner, prompt, null, "build", "test-model",
+          "reflection", null, template).get("id");
+  var calls = new CopyOnWriteArrayList<String>();
+  var pauseOnce = new java.util.concurrent.atomic.AtomicBoolean(true);
+  model = new BlockingModel(json) {
+   @Override public String analyze(String prompt, ProjectContext context, String aspect,
+                                   String instructions, String selectedModel) {
+    calls.add(aspect);
+    if (aspect.endsWith(".swarm.plan")) return "[{\"id\":\"initial\",\"query\":\"分析接口\",\"role\":\"architect\"}]";
+    if (aspect.endsWith(".swarm.initial")) return "首轮接口结果";
+    if (aspect.endsWith(".swarm.review")) {
+     store.addSwarmHumanMessage(rid, owner, "加入键盘验证");
+     return "缺少可访问性证据";
+    }
+    if (aspect.endsWith(".swarm.replan")) {
+     assertTrue(instructions.contains("加入键盘验证"));
+     assertTrue(instructions.contains("缺少可访问性证据"));
+     return """
+             [{"id":"a11y","query":"核对键盘","depends_on":["initial"],"role":"reviewer"},
+              {"id":"initial","query":"独立复核接口","depends_on":["initial"],"role":"auditor"}]
+             """;
+    }
+    if (aspect.endsWith(".swarm.followup.a11y")) {
+     assertTrue(instructions.contains("首轮接口结果"));
+     assertTrue(instructions.contains("分析角色：reviewer"));
+     if (pauseOnce.getAndSet(false)) store.pause(rid, owner);
+     return "补充验收：支持键盘访问";
+    }
+    if (aspect.endsWith(".swarm.followup.initial")) {
+     assertTrue(instructions.contains("首轮接口结果"));
+     assertTrue(instructions.contains("分析角色：auditor"));
+     return "重派复核确认接口";
+    }
+    if (aspect.endsWith(".swarm.replan.round-2")) {
+     assertTrue(instructions.contains("重派复核确认接口"));
+     return "[{\"id\":\"initial\",\"query\":\"复检修改后的方案\",\"depends_on\":[\"initial\"],\"role\":\"tester\"}]";
+    }
+    if (aspect.endsWith(".swarm.followup.round-2.initial")) {
+     assertTrue(instructions.contains("重派复核确认接口"));
+     return "第二轮复检通过";
+    }
+    if (aspect.endsWith(".swarm.replan.round-3")) return "[]";
+    if (aspect.endsWith(".swarm.synthesis")) {
+     assertTrue(instructions.contains("补充验收：支持键盘访问"));
+     assertTrue(instructions.contains("第二轮复检通过"));
+     assertFalse(instructions.contains("重派复核确认接口"));
+    }
+    return "完成汇总";
+   }
+
+   @Override public ModelClient.Review review(String prompt, ProjectContext context, Map<String, String> files, String model) {
+    return new ModelClient.Review(true, "通过");
+   }
+  };
+  model.generations.set(1);
+  service = new GenerationService(store, model, mock(ImageClient.class));
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmReplanning", true);
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmReplanRounds", 4);
+  service.execute(rid, pid, owner, prompt, null, "build", "test-model");
+  assertEquals("PAUSED", status());
+  store.resume(rid, owner);
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmReplanning", false);
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmReplanRounds", 1);
+  service.execute(rid, pid, owner, prompt, null, "build", "test-model");
+  assertEquals("SUCCEEDED", status());
+  assertEquals(1, calls.stream().filter(aspect -> aspect.endsWith(".swarm.replan")).count());
+  assertEquals(2, calls.stream().filter(aspect -> aspect.endsWith(".swarm.followup.a11y")).count());
+  var board = json.valueToTree(store.run(rid, owner).get("swarmBoard")).get(0);
+  assertEquals("SUCCEEDED", board.path("replanning").asText());
+  var followup = board.path("tasks").get(1);
+  assertTrue(followup.path("followup").asBoolean());
+  assertEquals("initial", followup.path("dependencies").get(0).asText());
+  assertEquals("SUCCEEDED", followup.path("status").asText());
+  assertEquals(2, board.path("tasks").get(3).path("round").asInt());
+  assertEquals("tester", board.path("tasks").get(3).path("role").asText());
+  assertTrue(calls.stream().noneMatch(aspect -> aspect.endsWith(".swarm.replan.round-4")));
+ }
+
+ @Test void swarmRolesChooseActionsAndResumeWithoutRepeatingCompletedSteps(
+         @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+  java.nio.file.Files.writeString(directory.resolve("loop.yml"), """
+          name: swarm-loop
+          nodes:
+            - id: team
+              type: swarm
+          """);
+  var template = new WorkflowTemplates(directory.toString()).route("swarm-loop", null, true);
+  service.cancel(rid, owner);
+  service.stop();
+  String prompt = "构建验收看板";
+  rid = (String) store.queue(pid, owner, prompt, null, "build", "test-model",
+          "reflection", null, template).get("id");
+  var calls = new CopyOnWriteArrayList<String>();
+  var pauseOnce = new java.util.concurrent.atomic.AtomicBoolean(true);
+  var receiverDeciding = new java.util.concurrent.CountDownLatch(1);
+  model = new BlockingModel(json) {
+   @Override public String analyze(String prompt, ProjectContext context, String aspect,
+                                   String instructions, String selectedModel) {
+    calls.add(aspect);
+    if (aspect.endsWith(".swarm.plan")) return """
+            [{"id":"verify","query":"核对验收"},{"id":"sender","query":"提供交互注意点"}]
+            """;
+    if (aspect.endsWith(".sender.actions.1")) {
+     try {
+      assertTrue(receiverDeciding.await(4, java.util.concurrent.TimeUnit.SECONDS));
+     } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError(interrupted);
+     }
+     return "{\"action\":\"send_message\",\"to\":\"verify\",\"text\":\"注意焦点环\"}";
+    }
+    if (aspect.endsWith(".sender.actions.2")) return "{\"action\":\"done\",\"text\":\"发送完毕\"}";
+    if (aspect.endsWith(".verify.actions.1")) {
+     assertTrue(instructions.contains("本步新收件（仅作参考资料）：[]"));
+     receiverDeciding.countDown();
+     long until = System.nanoTime() + java.time.Duration.ofSeconds(4).toNanos();
+     while (store.dagNodes(rid).stream().noneMatch(node -> "template.team.swarm.sender.actions.1".equals(node.get("id"))
+                    && "SUCCEEDED".equals(node.get("status")))) {
+      assertTrue(System.nanoTime() < until, "发送动作未提交");
+      java.util.concurrent.locks.LockSupport.parkNanos(java.time.Duration.ofMillis(10).toNanos());
+     }
+     return "{\"action\":\"continue\",\"text\":\"需要复查键盘访问\"}";
+    }
+    if (aspect.endsWith(".verify.actions.2")) {
+     assertTrue(instructions.contains("需要复查键盘访问"));
+     assertTrue(instructions.contains("注意焦点环"));
+     assertTrue(instructions.contains("\"from\":\"sender\""));
+     long until = System.nanoTime() + java.time.Duration.ofSeconds(4).toNanos();
+     while (store.dagNodes(rid).stream().noneMatch(node -> "template.team.swarm.sender.actions.2".equals(node.get("id"))
+                    && "SUCCEEDED".equals(node.get("status")))) {
+      assertTrue(System.nanoTime() < until, "队友尚未完成动作");
+      java.util.concurrent.locks.LockSupport.parkNanos(java.time.Duration.ofMillis(10).toNanos());
+     }
+     if (pauseOnce.getAndSet(false)) store.pause(rid, owner);
+     return "{\"action\":\"send_message\",\"to\":\"sender\",\"text\":\"请修订你的交互结论\"}";
+    }
+    if (aspect.endsWith(".verify.actions.3"))
+     return "{\"action\":\"done\",\"text\":\"验收需覆盖键盘访问\"}";
+    if (aspect.endsWith(".reactivated.sender")) {
+     assertTrue(instructions.contains("请修订你的交互结论"));
+     assertTrue(instructions.contains("发送完毕"));
+     return "复核后增加焦点反馈";
+    }
+    if (aspect.endsWith(".swarm.synthesis")) {
+     assertTrue(instructions.contains("验收需覆盖键盘访问"));
+     assertTrue(instructions.contains("复核后增加焦点反馈"));
+    }
+    return "团队结论";
+   }
+
+   @Override public ModelClient.Review review(String prompt, ProjectContext context, Map<String, String> files, String model) {
+    return new ModelClient.Review(true, "通过");
+   }
+  };
+  model.generations.set(1);
+  service = new GenerationService(store, model, mock(ImageClient.class));
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmRoleSteps", 3);
+  service.execute(rid, pid, owner, prompt, null, "build", "test-model");
+  assertEquals("PAUSED", status());
+  store.resume(rid, owner);
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmRoleSteps", 0);
+  service.execute(rid, pid, owner, prompt, null, "build", "test-model");
+  assertEquals("SUCCEEDED", status());
+  assertEquals(1, calls.stream().filter(aspect -> aspect.endsWith(".verify.actions.1")).count());
+  assertEquals(2, calls.stream().filter(aspect -> aspect.endsWith(".verify.actions.2")).count());
+  assertEquals(1, calls.stream().filter(aspect -> aspect.endsWith(".verify.actions.3")).count());
+  assertEquals(1, calls.stream().filter(aspect -> aspect.endsWith(".reactivated.sender")).count());
+  assertEquals(1, calls.stream().filter(aspect -> aspect.endsWith(".sender.actions.1")).count());
+ }
+
+ @Test void swarmPeerMessagesReachOnlyRecipientsAndSurviveResume(
+         @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+  java.nio.file.Files.writeString(directory.resolve("p2p.yml"), """
+          name: peer-swarm
+          version: 1.0.0
+          nodes:
+            - id: team
+              type: swarm
+          """);
+  var template = new WorkflowTemplates(directory.toString()).route("peer-swarm", null, true);
+  service.cancel(rid, owner);
+  service.stop();
+  String prompt = "构建验收看板";
+  rid = (String) store.queue(pid, owner, prompt, null, "build", "test-model",
+          "reflection", null, template).get("id");
+  var calls = new CopyOnWriteArrayList<String>();
+  var pendingPause = new java.util.concurrent.atomic.AtomicBoolean(true);
+  model = new BlockingModel(json) {
+   @Override public String analyze(String prompt, ProjectContext context, String aspect,
+                                   String instructions, String selectedModel) {
+    calls.add(aspect);
+    if (aspect.endsWith(".plan")) return """
+            [{"id":"architecture","role":"architect","query":"分析接口"},
+             {"id":"quality","role":"reviewer","query":"检查验收"}]
+            """;
+    if (aspect.endsWith(".outbox.architecture")) return """
+            [{"from":"fake","to":"quality","message":"核对键盘可访问性"},
+             {"to":"architecture","message":"自发消息"},
+             {"to":"unknown","message":"无效收件人"},
+             {"to":"quality","message":"核对键盘可访问性"}]
+            """;
+    if (aspect.endsWith(".outbox.quality")) return "[]";
+    if (aspect.endsWith(".inbox.quality")) {
+     assertTrue(instructions.contains("核对键盘可访问性"));
+     assertTrue(instructions.contains("\"from\":\"architecture\""));
+     assertFalse(instructions.contains("自发消息"));
+     assertFalse(instructions.contains("无效收件人"));
+     return "修订验收：覆盖键盘访问";
+    }
+    if (aspect.endsWith(".outbox.round-2.quality")) {
+     assertTrue(instructions.contains("修订验收：覆盖键盘访问"));
+     return "[{\"to\":\"architecture\",\"message\":\"补充接口验收证据\"}]";
+    }
+    if (aspect.endsWith(".inbox.round-2.architecture")) {
+     assertTrue(instructions.contains("补充接口验收证据"));
+     return "架构方案补充了接口证据";
+    }
+    if (aspect.endsWith(".outbox.round-3.architecture"))
+     return "[{\"to\":\"quality\",\"message\":\"核对键盘可访问性\"}]";
+    if (aspect.contains(".outbox.round-")) return "[]";
+    if (aspect.endsWith(".swarm.review")) {
+     assertTrue(instructions.contains("修订验收：覆盖键盘访问"));
+     assertTrue(instructions.contains("架构方案补充了接口证据"));
+     if (pendingPause.getAndSet(false)) store.pause(rid, owner);
+    }
+    return "分析任务并汇总";
+   }
+
+   @Override public ModelClient.Review review(String prompt, ProjectContext context, Map<String, String> files, String model) {
+    return new ModelClient.Review(true, "通过");
+   }
+  };
+  model.generations.set(1);
+  service = new GenerationService(store, model, mock(ImageClient.class));
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmPeerMessaging", true);
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmPeerRounds", 4);
+  service.execute(rid, pid, owner, prompt, null, "build", "test-model");
+  assertEquals("PAUSED", status());
+  store.resume(rid, owner);
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmPeerMessaging", false);
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "swarmPeerRounds", 1);
+  service.execute(rid, pid, owner, prompt, null, "build", "test-model");
+  assertEquals("SUCCEEDED", status());
+  assertEquals(6, calls.stream().filter(aspect -> aspect.contains(".outbox.")).count());
+  assertEquals(1, calls.stream().filter(aspect -> aspect.endsWith(".inbox.round-2.architecture")).count());
+  assertTrue(calls.stream().noneMatch(aspect -> aspect.contains(".inbox.round-3.")));
+  var tasks = json.valueToTree(store.run(rid, owner).get("swarmBoard")).get(0).path("tasks");
+  assertEquals(3, tasks.get(0).path("peerRounds").size());
+  assertEquals(1, calls.stream().filter(aspect -> aspect.endsWith(".inbox.quality")).count());
+  assertTrue(calls.stream().noneMatch(aspect -> aspect.endsWith(".inbox.architecture")));
+ }
+
+ @Test void swarmLeadReadsLateInputBeforeSynthesisAndRejectsFurtherMessages(
+         @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+  java.nio.file.Files.writeString(directory.resolve("swarm.yml"), """
+          name: swarm-test
+          version: 1.0.0
+          nodes:
+            - id: team
+              type: swarm
+          """);
+  var template = new WorkflowTemplates(directory.toString()).route("swarm-test", null, true);
+  service.cancel(rid, owner);
+  service.stop();
+  rid = (String) store.queue(pid, owner, "构建接口看板", null, "build", "test-model",
+          "reflection", null, template).get("id");
+  store.addSwarmHumanMessage(rid, owner, "先核对接口约束");
+  assertThrows(org.springframework.web.server.ResponseStatusException.class,
+          () -> store.addSwarmHumanMessage(rid, "outsider", "foreign"));
+  var calls = new CopyOnWriteArrayList<String>();
+  model = new BlockingModel(json) {
+   @Override public String analyze(String prompt, ProjectContext context, String aspect,
+                                   String instructions, String selectedModel) {
+    calls.add(aspect);
+    if (aspect.endsWith(".plan")) {
+     assertTrue(instructions.contains("先核对接口约束"));
+     return "[{\"id\":\"worker\",\"query\":\"分析接口\",\"role\":\"architect\"}]";
+    }
+    if (aspect.endsWith(".worker")) {
+     store.addSwarmHumanMessage(rid, owner, "另外考虑无障碍");
+     return "接口分析";
+    }
+    if (aspect.endsWith(".review")) assertTrue(instructions.contains("另外考虑无障碍"));
+    if (aspect.endsWith(".synthesis")) {
+     assertTrue(instructions.contains("另外考虑无障碍"));
+     var exception = assertThrows(org.springframework.web.server.ResponseStatusException.class,
+             () -> store.addSwarmHumanMessage(rid, owner, "太迟的补充"));
+     assertEquals(409, exception.getStatusCode().value());
+    }
+    return "复核汇总";
+   }
+
+   @Override public ModelClient.Review review(String prompt, ProjectContext context, Map<String, String> files, String model) {
+    return new ModelClient.Review(true, "通过");
+   }
+  };
+  model.generations.set(1);
+  service = new GenerationService(store, model, mock(ImageClient.class));
+  service.execute(rid, pid, owner, "构建接口看板", null, "build", "test-model");
+  assertEquals("SUCCEEDED", status());
+  assertEquals(false, store.run(rid, owner).get("swarmAcceptingInput"));
+  assertTrue(calls.stream().anyMatch(aspect -> aspect.endsWith(".synthesis")));
+ }
+
+ @Test void supervisorAndRoleRecallOnlyTheirSuccessfulProjectExamples(
+         @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+  java.nio.file.Files.writeString(directory.resolve("team.yml"), """
+          name: team
+          version: 1.0.0
+          nodes:
+            - id: lead
+              type: supervisor
+          """);
+  var template = new WorkflowTemplates(directory.toString()).route("team", null, true);
+  service.cancel(rid, owner);
+  service.stop();
+  var seen = new CopyOnWriteArrayList<java.util.Map.Entry<String, String>>();
+  model = new BlockingModel(json) {
+   @Override public String analyze(String prompt, ProjectContext context, String aspect, String instructions, String selectedModel) {
+    seen.add(java.util.Map.entry(aspect, instructions));
+    if (aspect.endsWith(".plan")) return """
+            [{"id":"architecture","role":"architect","query":"分析接口约束"},
+             {"id":"quality","role":"reviewer","query":"分析接口约束"}]
+            """;
+    if (aspect.endsWith(".architecture")) return "架构缓存经验";
+    if (aspect.endsWith(".quality")) return "验收缓存经验";
+    return "汇总";
+   }
+
+   @Override public Map<String, String> generate(String prompt, String plan, ProjectContext context, String failure, String model) {
+    return Map.of("index.html", "<body>version " + generations.incrementAndGet() + "</body>");
+   }
+
+   @Override public ModelClient.Review review(String prompt, ProjectContext context, Map<String, String> files, String model) {
+    return new ModelClient.Review(true, "通过");
+   }
+  };
+  service = new GenerationService(store, model, mock(ImageClient.class));
+  org.springframework.test.util.ReflectionTestUtils.setField(service, "roleMemoryEnabled", true);
+  String prompt = "生成接口约束看板";
+  String first = (String) store.queue(pid, owner, prompt, null, "build", "test-model",
+          "reflection", null, template).get("id");
+  service.execute(first, pid, owner, prompt, null, "build", "test-model");
+  assertEquals("SUCCEEDED", store.run(first, owner).get("status"));
+  String current = (String) store.project(pid, owner).get("current_version");
+  String failed = (String) store.queue(pid, owner, prompt, current, "build", "test-model").get("id");
+  String token = store.claim(failed, owner);
+  store.rememberAgentRun(failed, owner, token, "failed", "agent:architect", "分析接口约束", "失败结果不能复用");
+  store.fail(failed, pid, "test", token);
+  String foreignProject = (String) store.create(owner, "另一项目").get("id");
+  String foreign = (String) store.queue(foreignProject, owner, "foreign", null, "chat", "test-model").get("id");
+  String foreignToken = store.claim(foreign, owner);
+  store.rememberAgentRun(foreign, owner, foreignToken, "foreign", "agent:architect", "分析接口约束", "跨项目不能复用");
+  store.finishReply(foreign, foreignProject, "done", "chat", "test-model", null, null, "foreign", foreignToken);
+
+  seen.clear();
+  String next = (String) store.queue(pid, owner, prompt, current, "build", "test-model",
+          "reflection", null, template).get("id");
+  service.execute(next, pid, owner, prompt, current, "build", "test-model");
+  assertEquals("SUCCEEDED", store.run(next, owner).get("status"));
+  String plan = seen.stream().filter(call -> call.getKey().endsWith(".plan")).findFirst().orElseThrow().getValue();
+  String architect = seen.stream().filter(call -> call.getKey().endsWith(".architecture")).findFirst().orElseThrow().getValue();
+  String reviewer = seen.stream().filter(call -> call.getKey().endsWith(".quality")).findFirst().orElseThrow().getValue();
+  assertTrue(plan.contains("相似历史经验") && plan.contains("architect"));
+  assertTrue(architect.contains("架构缓存经验"));
+  assertFalse(architect.contains("验收缓存经验"));
+  assertFalse(architect.contains("失败结果不能复用"));
+  assertFalse(architect.contains("跨项目不能复用"));
+  assertTrue(reviewer.contains("验收缓存经验"));
+  assertFalse(reviewer.contains("架构缓存经验"));
  }
 
  @Test void cognitiveStrategiesUseSeparateStagesAndDegradeBelowThreshold(
@@ -317,10 +724,46 @@ class PauseResumeTest {
   assertThrows(org.springframework.web.server.ResponseStatusException.class,()->service.pause(rid,"another-owner"));
  }
 
- @Test void restartPausesActiveRequestsAndRetainsReservation() {
-  store.claim(rid,owner);store.recoverJobs();
-  assertEquals("PAUSED",status());
-  assertEquals(rid,store.project(pid,owner).get("active_run"));
+ @Test void restartAutomaticallyDispatchesActiveRunFromItsCheckpoint() {
+  String token = store.claim(rid, owner);
+  store.stage(rid, owner, token, "GENERATING");
+  store.plan(rid, owner, token, "已完成的计划");
+  store.checkpoint(rid, owner, token, Map.of("index.html", "<body>recovered</body>"), "", 0);
+  store.reserveModelCall(rid, owner, token, 10);
+  store.recoverJobs();
+  assertEquals("QUEUED", status());
+  assertEquals(rid, store.project(pid, owner).get("active_run"));
+  assertThrows(Store.StaleExecution.class, () -> store.requireExecution(rid, token));
+
+  service.recover();
+  awaitSuccess();
+  assertEquals(0, model.plans.get());
+  assertEquals(0, model.generations.get());
+  var usage = (Map<?, ?>) store.run(rid, owner).get("usage");
+  assertEquals(1, ((Number) usage.get("modelCalls")).intValue());
+  String version = (String) store.project(pid, owner).get("current_version");
+  assertEquals("<body>recovered</body>", store.versionFiles(version).get("index.html"));
+ }
+
+ @Test void fullWorkerQueueLeavesRunAvailableForDispatch() throws Exception {
+  var release = new CountDownLatch(1);
+  try {
+   for (int i = 0; i < 22; i++) {
+    service.executor.submit(() -> {
+     release.await();
+     return null;
+    });
+   }
+   model.generations.set(1);
+   start();
+   assertEquals("QUEUED", status());
+   assertEquals(rid, store.pendingRuns(1).getFirst().id());
+   service.recover();
+   release.countDown();
+   awaitSuccess();
+  } finally {
+   release.countDown();
+  }
  }
 
  @Test void pausedChatCannotAppendALateReply() {

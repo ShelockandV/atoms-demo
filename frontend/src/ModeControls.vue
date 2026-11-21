@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Code2, MessageSquare, Image as ImageIcon } from "lucide-vue-next";
+import { Code2, MessageSquare, Search, Image as ImageIcon } from "lucide-vue-next";
 import type { Mode, ModelConfig } from "./api";
 const props = defineProps<{
   mode: Mode;
@@ -17,7 +17,7 @@ const options = computed(() => props.config.models[props.mode] || []);
       <Code2 v-if="mode === 'build'" :size="13" /><MessageSquare
         v-else-if="mode === 'chat'"
         :size="13"
-      /><ImageIcon v-else :size="13" /><select
+      /><Search v-else-if="mode === 'research'" :size="13" /><ImageIcon v-else :size="13" /><select
         aria-label="输入模式"
         :value="mode"
         :disabled="disabled"
@@ -27,6 +27,7 @@ const options = computed(() => props.config.models[props.mode] || []);
       >
         <option value="build">构建应用</option>
         <option value="chat">对话问答</option>
+        <option value="research">资料研究</option>
         <option value="image">图像生成</option>
       </select>
     </div>

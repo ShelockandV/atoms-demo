@@ -1,8 +1,21 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
+  Activity,
+  AudioLines,
+  Bot,
+  BookOpen,
   ArrowUp,
   ArrowUpRight,
+  CalendarClock,
+  LogOut,
+  Moon,
+  Sun,
+  WandSparkles,
+  ClipboardCheck,
+  CreditCard,
+  Files as FilesIcon,
+  ShieldCheck,
   Plus,
   Search,
   PanelLeftClose,
@@ -45,39 +58,97 @@ import {
   type ModelConfig,
 } from "./api";
 import { canPreview, previewDocument } from "./preview";
-import ModeControls from "./ModeControls.vue";
+import ComposerOptions from "./ComposerOptions.vue";
 import AgentTrace from "./AgentTrace.vue";
-import PatternControls from "./PatternControls.vue";
+import SchedulePanel from "./SchedulePanel.vue";
+import GatewayAccount from "./GatewayAccount.vue";
+import GatewayMemoryPanel from "./GatewayMemoryPanel.vue";
+import { gatewayUser, signOutGateway } from "./gatewaySession";
+import SupervisorReviewsPanel from "./SupervisorReviewsPanel.vue";
+import DaemonApprovalsPanel from "./DaemonApprovalsPanel.vue";
+import DocumentSearch from "./DocumentSearch.vue";
+import SwarmInput from "./SwarmInput.vue";
+import SwarmBoard from "./SwarmBoard.vue";
 import { randomId } from "./randomId";
 import { onComposerKeydown } from "./composer";
+const showGatewayAccount = ref(false);
+const accountOpen = ref(false);
+const accountAnchor = ref<HTMLButtonElement>();
+const showAccountUsage = ref(false);
+const showAccountSettings = ref(false);
+const showSkills = ref(false);
+const darkTheme = ref(localStorage.getItem("atoms-theme") === "dark");
+const avatarFailed = ref(false);
+const accountName = computed(() => gatewayUser.value?.googleProfile?.name
+  || gatewayUser.value?.googleProfile?.email || (gatewayUser.value ? "Gateway 账号" : "登录 / 注册"));
+const accountEmail = computed(() => gatewayUser.value?.googleProfile?.email);
+const tokenFormat = new Intl.NumberFormat("zh-CN");
+const accountUsage = computed(() => projects.value.reduce((sum, item) => sum + (item.totalTokens ?? 0), 0));
+const accountCost = computed(() => {
+  const costs = projects.value.flatMap((item) => item.costUsd == null ? [] : [Number(item.costUsd)]);
+  return costs.length ? costs.reduce((sum, item) => sum + item, 0) : null;
+});
+watch(gatewayUser, (user) => {
+  avatarFailed.value = false;
+  if (!user) accountOpen.value = false;
+});
+function toggleTheme() {
+  darkTheme.value = !darkTheme.value;
+  localStorage.setItem("atoms-theme", darkTheme.value ? "dark" : "light");
+}
+function closeAccount(restoreFocus = false) {
+  if (!accountOpen.value) return;
+  accountOpen.value = false;
+  if (restoreFocus) accountAnchor.value?.focus();
+}
+const showGatewayMemory = ref(false);
 const projects = ref<Project[]>([]),
   project = ref<Detail | null>(null);
 const config = ref<ModelConfig>({
     demo: true,
     model: "",
     configured: false,
-    models: { build: [], chat: [], image: [] },
-    defaults: { build: "", chat: "", image: "" },
+    models: { build: [], chat: [], image: [], research: [] },
+    defaults: { build: "", chat: "", image: "", research: "" },
   }),
   connected = ref(false);
 const mode = ref<Mode>("build"),
   selectedModel = ref("");
 const selectedPattern = ref("react");
-function selectPattern(value: string) {
+const showSchedules = ref(false);
+const showDaemonApprovals = ref(false);
+const showSupervisorReviews = ref(false);
+const showDocumentSearch = ref(false);
+const selectedSkill = ref("");
+const availableSkills = computed(() => {
+  const pattern = mode.value === "build" ? selectedPattern.value : "react";
+  if (mode.value === "image" || mode.value === "research" || pattern.startsWith("template:")) return [];
+  return (config.value.skills ?? []).filter((skill) =>
+    !(pattern === "dag" && skill.requires_role)
+    && (!skill.requires_tools.length || (mode.value === "build" && ["react", "auto"].includes(pattern))),
+  );
+});
+const activeSkill = computed(() =>
+  availableSkills.value.find((skill) => `${skill.name}@${skill.version}` === selectedSkill.value),
+);
+function selectPattern(value: string, persist = true) {
   const known = (config.value.patterns || [{ id: "react" }]).some((p) => p.id === value)
     || (value === "auto" && config.value.learningRouting)
     || config.value.templates?.some((template) => `template:${template.id}` === value);
   if (!known) return;
   selectedPattern.value = value;
-  localStorage.setItem("atoms-pattern", value);
+  if (persist) localStorage.setItem("atoms-pattern-override", value);
 }
 const modeLabels: Record<Mode, string> = {
   build: "构建应用",
   chat: "对话问答",
+  research: "资料研究",
   image: "图像生成",
 };
 const placeholder = computed(() =>
-  mode.value === "chat"
+  mode.value === "research"
+    ? "输入要研究的问题，例如查找项目文档中的接口约束…"
+    : mode.value === "chat"
     ? "直接提问，或一起讨论你的需求…"
     : mode.value === "image"
       ? "描述画面内容、风格、构图和色彩…"
@@ -99,14 +170,22 @@ function selectMode(value: Mode) {
   selectedModel.value =
     saved && config.value.models[value].includes(saved)
       ? saved
-      : config.value.defaults[value];
+      : config.value.models[value].includes("auto") ? "auto" : config.value.defaults[value];
   if (value === "image" && project.value) view.value = "images";
   else if (view.value === "images") view.value = "preview";
 }
 const prompt = ref(""),
-  search = ref(""),
   sidebar = ref(window.innerWidth > 850),
   view = ref<"preview" | "code" | "images">("preview");
+const browsingSessions = ref(false);
+const sessionsLoading = ref(false);
+const sessionsError = ref("");
+const historyQuery = ref("");
+const sessionView = ref<"conversation" | "summary">("conversation");
+const showTimeline = ref(false);
+const showWorkspace = ref(false);
+const currency = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD", maximumFractionDigits: 6 });
+const dateTime = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" });
 const mobile = ref(false),
   history = ref(false),
   help = ref(false),
@@ -124,8 +203,15 @@ const selectedVersion = ref<string | null>(null),
   saving = ref(false),
   controlling = ref(false);
 const chatMessages = ref<HTMLElement | null>(null);
+const agentDialog = ref<HTMLDialogElement>();
+const agentDescriptions: Record<Mode, string> = {
+  build: "构建应用、修改代码并查看预览",
+  chat: "提问、讨论和整理思路",
+  research: "查找资料并生成带引用的报告",
+  image: "根据描述生成图片",
+};
 watch(
-  () => project.value?.messages.length,
+  () => [project.value?.id, project.value?.messages.length, browsingSessions.value, sessionView.value] as const,
   async () => {
     await nextTick();
     if (chatMessages.value)
@@ -152,7 +238,7 @@ const stages = [
 const active = computed(
   () =>
     !!project.value?.run &&
-    !["SUCCEEDED", "FAILED", "CANCELLED", "PAUSED", "AWAITING_APPROVAL"].includes(project.value.run.status),
+    !["SUCCEEDED", "FAILED", "CANCELLED", "TIMEOUT", "PAUSED", "AWAITING_APPROVAL"].includes(project.value.run.status),
 );
 const paused = computed(() => project.value?.run?.status === "PAUSED");
 const awaitingApproval = computed(() => project.value?.run?.status === "AWAITING_APPROVAL");
@@ -205,34 +291,29 @@ function beforeExport(e: MouseEvent) {
     error.value = "当前编辑尚未保存，请先保存，再导出源码。";
   }
 }
-const visibleProjects = computed(() =>
-  projects.value.filter((p) =>
-    p.title.toLowerCase().includes(search.value.toLowerCase()),
-  ),
-);
-const suggestions = [
-  {
-    title: "个人记账工具",
-    desc: "把每一笔生活，都记录下来",
-    kind: "expense",
-    prompt:
-      "帮我做一个简洁好看的个人记账工具，可以新增和删除支出，显示总金额。",
-  },
-  {
-    title: "每日任务看板",
-    desc: "让重要的事情，井井有条",
-    kind: "tasks",
-    prompt:
-      "创建一个每日任务看板，可以添加任务、标记完成和删除任务，显示完成数量。",
-  },
-  {
-    title: "创意工作室官网",
-    desc: "给你的灵感，一个漂亮的家",
-    kind: "studio",
-    prompt:
-      "设计一个简洁有质感的创意工作室落地页，包含品牌介绍、服务和行动按钮。",
-  },
-];
+const recentProjects = computed(() => projects.value.slice(0, 5));
+const historySessions = computed(() => {
+  const query = historyQuery.value.trim().toLowerCase();
+  return projects.value.filter((p) => [p.title, p.latestModel, p.latestPattern].some((value) => value?.toLowerCase().includes(query)) || !query);
+});
+async function showSessions() {
+  browsingSessions.value = true;
+  if (window.innerWidth <= 850) sidebar.value = false;
+  await loadSessions();
+}
+async function loadSessions() {
+  if (sessionsLoading.value) return;
+  sessionsLoading.value = true;
+  sessionsError.value = "";
+  try {
+    await refreshList();
+  } catch (e) {
+    sessionsError.value = e instanceof Error ? e.message : "会话加载失败";
+  } finally {
+    sessionsLoading.value = false;
+  }
+}
+function reloadWorkbench() { window.location.reload(); }
 function notify(text: string) {
   toast.value = text;
   if (toastTimer) clearTimeout(toastTimer);
@@ -278,6 +359,12 @@ function chooseVersion(v: Version) {
   loadFiles(v);
 }
 async function openProject(id: string, force = false) {
+  if (!force && project.value?.id === id && browsingSessions.value) {
+    browsingSessions.value = false;
+    error.value = "";
+    if (window.innerWidth <= 850) sidebar.value = false;
+    return;
+  }
   if (
     !force &&
     dirty.value &&
@@ -290,6 +377,13 @@ async function openProject(id: string, force = false) {
   try {
     const detail = await api<Detail>("/projects/" + id);
     if (seq !== loadSequence || disposed) return;
+    if (!force || project.value?.id !== id) {
+      sessionView.value = "conversation";
+      showTimeline.value = false;
+      showWorkspace.value = false;
+    }
+    if (!force || !browsingSessions.value) browsingSessions.value = false;
+    if (!force && window.innerWidth <= 850) sidebar.value = false;
     project.value = detail;
     if (mode.value === "image") view.value = "images";
     localStorage.setItem("atoms-current", id);
@@ -316,6 +410,10 @@ function home() {
   ++loadSequence;
   disconnect();
   project.value = null;
+  files.value = {};
+  selectedVersion.value = null;
+  browsingSessions.value = false;
+  if (window.innerWidth <= 850) sidebar.value = false;
   localStorage.removeItem("atoms-current");
   prompt.value = "";
   error.value = "";
@@ -340,6 +438,7 @@ async function submit() {
       });
       id = p.id;
       await openProject(id, true);
+      if (project.value?.id !== id) return;
       await refreshList();
     }
     const text = prompt.value.trim();
@@ -354,6 +453,7 @@ async function submit() {
       pattern: mode.value === "build" && !template ? selectedPattern.value : undefined,
       template,
       requireTemplate: Boolean(template),
+      skill: activeSkill.value ? selectedSkill.value : undefined,
     });
     prompt.value = "";
     if (project.value?.id === id) {
@@ -381,7 +481,7 @@ function watchRun(rid: string, pid: string) {
   async function receive(run: Run) {
     if (seq !== watchSequence || project.value?.id !== pid || disposed) return;
     project.value.run = run;
-    if (["SUCCEEDED", "FAILED", "CANCELLED", "PAUSED", "AWAITING_APPROVAL"].includes(run.status) && !finishing) {
+    if (["SUCCEEDED", "FAILED", "CANCELLED", "TIMEOUT", "PAUSED", "AWAITING_APPROVAL"].includes(run.status) && !finishing) {
       finishing = true;
       disconnect();
       await openProject(pid, true);
@@ -407,21 +507,103 @@ function watchRun(rid: string, pid: string) {
     }
   }, 2500);
 }
-async function controlRun(action: "pause" | "resume" | "approve" | "reject") {
+interface PlanReview {
+  version: number;
+  approvalId: string;
+  decision: string;
+  revisions: { version: number; plan_text: string; feedback: string; created_at: string }[];
+}
+const planFeedback = ref("");
+const planReview = ref<PlanReview>();
+const showPlanHistory = ref(false);
+
+watch(() => [project.value?.run?.id, project.value?.run?.planReviewVersion] as const,
+  async ([id, version], [previousId]) => {
+    if (id !== previousId) {
+      planReview.value = undefined;
+      planFeedback.value = "";
+      showPlanHistory.value = false;
+    }
+    if (!id || !version) return;
+    try {
+      const review = await api<PlanReview>(`/runs/${id}/plan-review`);
+      if (project.value?.run?.id === id && project.value.run.planReviewVersion === version)
+        planReview.value = review;
+    } catch (e) {
+      if (project.value?.run?.id === id) report(e);
+    }
+  });
+
+watch(() => project.value?.run?.supervisorReview ? project.value.run.id : undefined, (id, _, cleanup) => {
+  if (!id) return;
+  const timer = window.setInterval(async () => {
+    try {
+      const updated = await api<Run>(`/runs/${id}`);
+      if (project.value?.run?.id !== id) return;
+      project.value.run = updated;
+      if (!updated.supervisorReview) {
+        window.clearInterval(timer);
+        if (active.value) watchRun(id, project.value.id);
+        else await openProject(project.value.id, true);
+      }
+    } catch (e) {
+      if (project.value?.run?.id === id) report(e);
+    }
+  }, 2500);
+  cleanup(() => window.clearInterval(timer));
+});
+
+async function revisePlan() {
+  const run = project.value?.run;
+  const feedback = planFeedback.value.trim();
+  if (!run?.planReviewVersion || !feedback || controlling.value) return;
+  controlling.value = true;
+  error.value = "";
+  try {
+    const review = await api<PlanReview>(`/runs/${run.id}/plan-review`, "POST", {
+      version: run.planReviewVersion, feedback,
+    });
+    if (project.value?.run?.id !== run.id) return;
+    const updated = await api<Run>(`/runs/${run.id}`);
+    if (project.value?.run?.id !== run.id) return;
+    planReview.value = review;
+    project.value.run = updated;
+    planFeedback.value = "";
+  } catch (e) {
+    report(e);
+    if (project.value?.run?.id === run.id) {
+      try {
+        const updated = await api<Run>(`/runs/${run.id}`);
+        if (project.value?.run?.id === run.id) project.value.run = updated;
+      } catch {
+        // Keep the original feedback error visible.
+      }
+    }
+  } finally {
+    controlling.value = false;
+  }
+}
+
+async function controlRun(action: "pause" | "resume" | "cancel" | "approve" | "reject") {
   const run = project.value?.run,
     pid = project.value?.id;
   if (!run || !pid || controlling.value) return;
   controlling.value = true;
   error.value = "";
   try {
-    const endpoint = action === "approve" || action === "reject" ? `approval?approved=${action === "approve"}` : action;
+    const approvalId = project.value?.run?.approvalId;
+    const approvalQuery = approvalId ? `&approvalId=${encodeURIComponent(approvalId)}` : "";
+    const endpoint = action === "approve" || action === "reject"
+      ? `approval?approved=${action === "approve"}${approvalQuery}` : action;
     const updated = await api<Run>(`/runs/${run.id}/${endpoint}`, "POST");
-    if (project.value?.id !== pid) return;
+    if (project.value?.id !== pid || project.value.run?.id !== run.id) return;
     project.value.run = updated;
-    if (updated.status === "FAILED") {
+    if (["FAILED", "CANCELLED", "TIMEOUT", "SUCCEEDED"].includes(updated.status)) {
       disconnect();
       await openProject(pid, true);
-      error.value = updated.error || "任务失败";
+      if (updated.status === "FAILED" || updated.status === "TIMEOUT")
+        error.value = updated.error || (updated.status === "TIMEOUT" ? "任务已超时" : "任务失败");
+      if (updated.status === "CANCELLED") notify("任务已终止");
       await refreshList();
     } else if (updated.status === "PAUSED") disconnect();
     else watchRun(updated.id, pid);
@@ -513,17 +695,17 @@ onMounted(async () => {
   window.addEventListener("beforeunload", beforeUnload);
   try {
     config.value = await api<ModelConfig>("/config");
-    selectPattern(localStorage.getItem("atoms-pattern") || "react");
+    selectPattern(config.value.learningRouting ? "auto" : "react", false);
+    const patternOverride = localStorage.getItem("atoms-pattern-override");
+    if (patternOverride) selectPattern(patternOverride, false);
     const savedMode = localStorage.getItem("atoms-mode");
     selectMode(
-      savedMode === "chat" || savedMode === "image" ? savedMode : "build",
+      savedMode === "chat" || savedMode === "image" || savedMode === "research" ? savedMode : "build",
     );
     connected.value = true;
-    await refreshList();
-    const id = localStorage.getItem("atoms-current");
-    if (id && projects.value.some((p) => p.id === id))
-      await openProject(id, true);
+    await loadSessions();
   } catch (e) {
+    sessionsError.value = e instanceof Error ? e.message : "工作台连接失败";
     report(e);
   }
 });
@@ -539,14 +721,15 @@ onUnmounted(() => {
 
 <template>
   <div
-    class="app-shell"
-    :class="{ 'sidebar-hidden': !sidebar, 'is-workspace': !!project }"
+    class="app-shell atoms-task-app"
+    :class="{ 'sidebar-hidden': !sidebar, 'is-workspace': !!project && !browsingSessions, 'atoms-dark': darkTheme }"
+    @click="closeAccount()"
+    @keydown.esc="closeAccount(true)"
   >
     <aside class="sidebar" v-if="sidebar">
       <div class="brand-row">
         <button class="brand" @click="home" aria-label="Atoms 首页">
-          <span class="brand-mark" aria-hidden="true"
-            ><i></i><i></i><i></i><i></i></span
+          <span class="brand-mark" aria-hidden="true"><AudioLines :size="21" /></span
           ><span>Atoms</span></button
         ><button
           class="icon-button subtle"
@@ -556,55 +739,50 @@ onUnmounted(() => {
           <PanelLeftClose :size="17" />
         </button>
       </div>
-      <button class="new-project" @click="home">
-        <Plus :size="17" /> 新建项目
+      <button class="new-project" :aria-current="!project && !browsingSessions ? 'page' : undefined" @click="home">
+        <Plus :size="17" /> 新建会话
         <span class="shortcut"><Command :size="10" /> N</span>
       </button>
-      <label class="search"
-        ><Search :size="15" /><input
-          v-model="search"
-          placeholder="搜索项目"
-          aria-label="搜索项目"
-        /><span>⌕</span></label
-      >
-      <div class="nav-label">
-        你的项目 <span>{{ projects.length }}</span>
+      <button class="session-nav" @click="agentDialog?.showModal()"><Bot :size="16" /> Agent</button>
+      <button class="session-nav atoms-skills-nav" @click="showSkills = true"><WandSparkles :size="16" /> 技能</button>
+      <button class="session-nav atoms-schedules-nav" @click="showSchedules = true"><CalendarClock :size="16" /> 定时任务</button>
+      <div class="atoms-recents-heading">
+        <span>最近会话</span>
+        <button class="icon-button" aria-label="会话历史" title="会话历史" :aria-pressed="browsingSessions" @click="showSessions"><History :size="17" /></button>
       </div>
-      <nav class="project-list">
-        <button
-          v-for="p in visibleProjects"
-          :key="p.id"
-          :class="{ selected: project?.id === p.id }"
-          @click="openProject(p.id)"
-        >
+      <nav class="project-list" aria-label="最近会话">
+        <button v-for="p in recentProjects" :key="p.id" :class="{ selected: !browsingSessions && project?.id === p.id }"
+          @click="openProject(p.id)">
           <MessageSquare :size="16" /><span>{{ p.title }}</span>
         </button>
-        <div v-if="!visibleProjects.length" class="no-projects">
-          {{ search ? "没有找到相关项目" : "你的下一个想法，从这里开始。" }}
-        </div>
       </nav>
       <div class="sidebar-bottom">
-        <div class="workspace-note">
-          <span class="tiny-orbit">✧</span><strong>让好想法，真正发生。</strong>
-          <p>从第一行需求，到你的下一个作品。</p>
-          <button @click="help = true">
-            探索工作台 <ArrowUpRight :size="13" />
+        <div class="atoms-account-wrap" @click.stop>
+          <div v-if="accountOpen" id="atoms-account-menu" class="atoms-account-menu" aria-label="个人账号">
+            <div class="atoms-account-identity"><strong>{{ accountName }}</strong><small v-if="accountEmail">{{ accountEmail }}</small></div>
+            <button v-if="!gatewayUser" @click="showGatewayAccount = true; closeAccount()">使用 Google 或 Gateway 登录</button>
+            <button v-if="gatewayUser" @click="showGatewayMemory = true; closeAccount()"><FilesIcon :size="15" /> 记忆文件</button>
+            <button @click="showSupervisorReviews = true; closeAccount()"><ShieldCheck :size="15" /> Supervisor 审核</button>
+            <button @click="showDaemonApprovals = true; closeAccount()"><ClipboardCheck :size="15" /> 审批</button>
+            <button v-if="gatewayUser" @click="showAccountUsage = true; closeAccount()"><CreditCard :size="15" /> 用量与费用</button>
+            <button v-if="gatewayUser" @click="showAccountSettings = true; closeAccount()"><Settings2 :size="15" /> 账号设置</button>
+            <button @click="help = true; closeAccount()"><BookOpen :size="15" /> 使用帮助</button>
+            <button v-if="gatewayUser" class="atoms-signout" @click="signOutGateway(); accountAnchor?.focus()"><LogOut :size="15" /> 退出登录</button>
+          </div>
+          <button ref="accountAnchor" class="account" :aria-expanded="accountOpen"
+            :aria-controls="accountOpen ? 'atoms-account-menu' : undefined" @click="accountOpen = !accountOpen">
+            <span class="avatar"><img v-if="gatewayUser?.googleProfile?.picture && !avatarFailed" :src="gatewayUser.googleProfile.picture" alt="" referrerpolicy="no-referrer" @error="avatarFailed = true" /><span v-else aria-hidden="true">{{ gatewayUser ? Array.from(accountName)[0] : 'A' }}</span></span>
+            <span><strong>{{ accountName }}</strong><small>{{ accountEmail || "个人工作区" }}</small></span>
+          </button>
+          <button class="atoms-theme-toggle icon-button" :aria-label="darkTheme ? '切换到浅色模式' : '切换到深色模式'" @click="toggleTheme">
+            <Sun v-if="darkTheme" :size="17" /><Moon v-else :size="17" />
           </button>
         </div>
-        <button class="account" @click="help = true">
-          <span class="avatar">Y</span
-          ><span
-            ><strong>我的工作空间</strong
-            ><small>{{
-              config.demo ? "本地演示模式" : "AI 创作工作台"
-            }}</small></span
-          ><Settings2 :size="16" />
-        </button>
       </div>
     </aside>
     <main class="main-area">
       <header class="topbar">
-        <div v-if="!project" class="breadcrumbs">
+        <div v-if="!project || browsingSessions" class="breadcrumbs">
           <button
             v-if="!sidebar"
             class="icon-button"
@@ -612,7 +790,7 @@ onUnmounted(() => {
             aria-label="展开侧栏"
           >
             <PanelLeftOpen :size="18" /></button
-          ><span class="top-label">我的工作空间</span>
+          ><span class="top-label">{{ browsingSessions ? "会话历史" : "新任务" }}</span>
         </div>
         <div v-else class="breadcrumbs">
           <button
@@ -622,12 +800,19 @@ onUnmounted(() => {
             aria-label="展开侧栏"
           >
             <PanelLeftOpen :size="18" /></button
-          ><button class="icon-button" @click="home" aria-label="返回首页">
+          ><button class="icon-button" @click="showSessions" aria-label="返回会话历史">
             <ArrowLeft :size="16" /></button
           ><span class="project-title">{{ project.title }}</span
           ><ChevronDown :size="13" />
         </div>
         <div class="top-actions">
+          <button v-if="!sidebar" class="button small" @click="showGatewayAccount = true">{{ gatewayUser ? "账号" : "登录 / 注册" }}</button>
+          <label v-if="!browsingSessions" class="task-agent-picker"><Bot :size="16" />
+            <select  :value="mode" :disabled="busy" aria-label="选择 Agent"
+              @change="selectMode(($event.target as HTMLSelectElement).value as Mode)">
+              <option v-for="(label, value) in modeLabels" :key="value" :value="value">{{ label }}</option>
+            </select>
+          </label>
           <span class="mode-indicator" :class="{ offline: !connected }"
             ><i></i
             >{{
@@ -638,61 +823,59 @@ onUnmounted(() => {
                   : "模型已配置"
             }}</span
           ><button
-            v-if="project"
+            v-if="project && !browsingSessions"
             class="button small"
             :disabled="!project.currentVersion"
             @click="history = true"
           >
             <History :size="14" /> 版本历史</button
           ><a
-            v-if="project?.currentVersion"
+            v-if="project?.currentVersion && !browsingSessions"
             class="button small primary"
             :href="`/api/projects/${project.id}/export${selectedVersion ? '?versionId=' + encodeURIComponent(selectedVersion) : ''}`"
             @click="beforeExport"
             ><Download :size="14" /> 导出源码</a
-          ><button
-            v-if="!project"
-            class="button small nav-guide"
-            @click="help = true"
           >
-            开始探索 <ArrowUpRight :size="14" />
-          </button>
         </div>
       </header>
-      <div v-if="!project" class="home-scroll">
+      <section v-if="browsingSessions" class="session-history" aria-labelledby="session-history-title">
+        <div class="session-history-heading">
+          <h1 id="session-history-title">会话历史</h1>
+          <button class="button" :disabled="sessionsLoading" @click="connected ? loadSessions() : reloadWorkbench()">
+            <RotateCcw :size="15" /> 刷新
+          </button>
+        </div>
+        <label class="session-search"><Search :size="17" />
+          <input v-model="historyQuery" type="search" aria-label="搜索会话历史" placeholder="搜索会话标题、模型或工作流" />
+        </label>
+        <p v-if="sessionsError || error" class="error-banner" role="alert">{{ sessionsError || error }}</p>
+        <p v-if="sessionsLoading && !projects.length" role="status">正在加载会话…</p>
+        <div v-else class="session-table-wrap" :aria-busy="sessionsLoading">
+          <table class="session-table">
+            <thead><tr><th scope="col">会话</th><th scope="col">Agent</th><th scope="col">任务数</th><th scope="col">用量与费用</th><th scope="col">操作</th></tr></thead>
+            <tbody>
+              <tr v-for="item in historySessions" :key="item.id">
+                <td><button class="session-link" @click="openProject(item.id)">{{ item.title }}</button>
+                  <time :datetime="item.updatedAt">{{ dateTime.format(new Date(item.updatedAt)) }}</time></td>
+                <td>{{ item.latestPattern && item.latestMode === "build" ? item.latestPattern : item.latestMode ? modeLabels[item.latestMode] : "—" }}
+                  <small v-if="item.latestModel">{{ item.latestModel }}</small></td>
+                <td>{{ item.runCount ?? "—" }}</td>
+                <td>{{ item.costUsd == null && item.totalTokens == null ? "暂无计量" : item.costUsd == null ? "—" : currency.format(item.costUsd) }}
+                  <small v-if="item.totalTokens != null">{{ tokenFormat.format(item.totalTokens) }} tokens</small></td>
+                <td><button class="button small" :aria-label="'打开会话 ' + item.title" @click="openProject(item.id)">打开 <ArrowUpRight :size="14" /></button></td>
+              </tr>
+              <tr v-if="!historySessions.length && !sessionsError">
+                <td colspan="5" class="session-empty">{{ historyQuery ? "没有符合条件的会话" : "还没有会话。新建会话开始使用 Agent。" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <div v-else-if="!project" class="home-scroll">
         <section class="hero">
-          <div class="dashboard-notice">
-            <Sparkles :size="13" /><span>一个工作空间，三种创造方式</span>
-          </div>
-          <div class="creation-orbs" aria-label="创作方式">
-            <button
-              :disabled="busy"
-              :class="{ active: mode === 'build' }"
-              @click="selectMode('build')"
-              aria-label="切换到构建应用"
-              title="构建应用"
-            >
-              <Code2 :size="23" /></button
-            ><button
-              :disabled="busy"
-              :class="{ active: mode === 'chat' }"
-              @click="selectMode('chat')"
-              aria-label="切换到对话问答"
-              title="对话问答"
-            >
-              <MessageSquare :size="22" /></button
-            ><button
-              :disabled="busy"
-              :class="{ active: mode === 'image' }"
-              @click="selectMode('image')"
-              aria-label="切换到图像生成"
-              title="图像生成"
-            >
-              <ImageIcon :size="23" />
-            </button>
-          </div>
-          <h1>你想创造什么？</h1>
-          <p class="hero-description">构建应用、探索问题，或让想象变成画面。</p>
+          <span class="atoms-task-emblem" aria-hidden="true"><AudioLines :size="30" /></span>
+          <h1>你想完成什么？</h1>
+          <p class="hero-description">提出问题、研究资料，或让 Agent 帮你构建应用。</p>
           <form class="prompt-box" @submit.prevent="submit">
             <textarea
               v-model="prompt"
@@ -701,16 +884,10 @@ onUnmounted(() => {
               maxlength="10000"
               @keydown="composerKeydown"
             ></textarea>
-            <PatternControls v-if="mode === 'build'" :value="selectedPattern" :config="config" :disabled="busy" @change="selectPattern" />
-            <div class="composer-key-hint">Enter 发送 · Shift+Enter 换行</div>
             <div class="prompt-bottom">
-              <ModeControls
-                :mode="mode"
-                :model="selectedModel"
-                :config="config"
-                :disabled="busy"
-                @mode="selectMode"
-                @model="selectModel"
+              <ComposerOptions :mode="mode" :config="config" :model="selectedModel" :pattern="selectedPattern"
+                :skills="availableSkills" :skill="activeSkill ? selectedSkill : ''" :disabled="busy"
+                @model="selectModel" @pattern="selectPattern" @skill="selectedSkill = $event"
               /><button
                 class="start-button"
                 :aria-label="
@@ -718,20 +895,11 @@ onUnmounted(() => {
                     ? '发送问题'
                     : mode === 'image'
                       ? '生成图片'
-                      : '开始构建'
+                      : mode === 'research' ? '开始研究' : '开始构建'
                 "
                 :disabled="!prompt.trim() || busy || !connected"
               >
-                <span>{{
-                  creating
-                    ? "准备中"
-                    : mode === "chat"
-                      ? "发送问题"
-                      : mode === "image"
-                        ? "生成图片"
-                        : "开始"
-                }}</span
-                ><LoaderCircle
+                <LoaderCircle
                   v-if="creating"
                   class="spin"
                   :size="17"
@@ -739,12 +907,6 @@ onUnmounted(() => {
               </button>
             </div>
           </form>
-          <div class="quick-ideas">
-            <span>试试这些想法</span
-            ><button @click="example(suggestions[0].prompt)">✧ 个人记账</button
-            ><button @click="example(suggestions[1].prompt)">☷ 任务看板</button
-            ><button @click="example(suggestions[2].prompt)">◈ 品牌官网</button>
-          </div>
           <div v-if="error" class="error-banner">
             <CircleAlert :size="15" />{{ error
             }}<button @click="error = ''" aria-label="关闭错误">
@@ -752,112 +914,31 @@ onUnmounted(() => {
             </button>
           </div>
         </section>
-        <section id="inspiration" class="inspiration">
-          <div class="section-heading">
-            <div>
-              <span class="section-kicker">START CREATING</span>
-              <h2>从这些想法开始</h2>
-            </div>
-            <span class="section-caption"
-              >选择一个模板，开始你的创作 <ArrowUpRight :size="14"
-            /></span>
-          </div>
-          <div class="template-grid">
-            <button
-              v-for="s in suggestions"
-              :key="s.kind"
-              class="template-card"
-              @click="example(s.prompt)"
-            >
-              <div class="template-art" :class="s.kind">
-                <div class="mini-browser">
-                  <div class="mini-header">
-                    <span class="mini-logo">{{
-                      s.kind === "expense"
-                        ? "◈ pocket"
-                        : s.kind === "tasks"
-                          ? "◈ focus"
-                          : "◈ studio."
-                    }}</span
-                    ><span
-                      >About &nbsp; Explore &nbsp; <b>Get started ↗</b></span
-                    >
-                  </div>
-                  <template v-if="s.kind === 'expense'"
-                    ><div class="mini-eyebrow">YOUR DAILY FINANCES</div>
-                    <h3>小账本，大生活。</h3>
-                    <div class="mini-stat-row">
-                      <div>
-                        <small>本月支出</small
-                        ><strong>¥ 2,480<span>.00</span></strong
-                        ><em>↘ 比上月减少 12.8%</em>
-                      </div>
-                      <div class="mini-chart">
-                        <i
-                          v-for="n in 8"
-                          :key="n"
-                          :style="{ height: 20 + ((n * 17) % 55) + 'px' }"
-                        ></i>
-                      </div>
-                    </div>
-                    <div class="mini-list">
-                      <span>☕ 咖啡与小确幸</span><b>− ¥ 28.00</b>
-                    </div>
-                    <div class="mini-list">
-                      <span>◧ 日常生活</span><b>− ¥ 128.00</b>
-                    </div></template
-                  ><template v-else-if="s.kind === 'tasks'"
-                    ><div class="mini-eyebrow">
-                      A LITTLE FOCUS GOES A LONG WAY
-                    </div>
-                    <h3>今天，好好专注。</h3>
-                    <div class="mini-task">
-                      <span>○</span> 让下一个想法落地 <b>进行中</b>
-                    </div>
-                    <div class="mini-task">
-                      <span>○</span> 读一本喜欢的书 <b>今天</b>
-                    </div>
-                    <div class="mini-task done">
-                      <span>●</span> 给自己泡一杯咖啡 <Check :size="11" />
-                    </div>
-                    <div class="mini-progress"><i></i></div>
-                    <small class="mini-foot"
-                      >一点一滴，都算数。</small
-                    ></template
-                  ><template v-else
-                    ><div class="studio-orbit"></div>
-                    <div class="mini-eyebrow">INDEPENDENT CREATIVE STUDIO</div>
-                    <h3>Ideas made<br /><i>extraordinary.</i></h3>
-                    <p>We turn your what-ifs into what's next.</p>
-                    <div class="mini-studio-button">
-                      Let's create together ↗
-                    </div></template
-                  >
-                </div>
-              </div>
-              <div class="template-info">
-                <div>
-                  <h3>{{ s.title }}</h3>
-                  <p>{{ s.desc }}</p>
-                </div>
-                <span class="template-arrow"><ArrowUpRight :size="18" /></span>
-              </div>
-            </button>
-          </div>
-        </section>
-        <footer class="home-footer">
-          <span class="footer-brand">✧ atoms</span
-          ><span>为尚未实现的想法而造。</span><span>把想法变成现实</span>
-        </footer>
       </div>
-      <div v-else class="workbench">
+      <div v-else class="workbench" :class="{ 'conversation-only': !showWorkspace && !showTimeline, 'timeline-open': showTimeline }">
         <section class="chat-panel">
-          <div class="chat-heading">
-            <span><Sparkles :size="15" /> 与 Atoms 一起创造</span
-            ><span class="live-dot"></span>
+          <div class="session-toolbar" aria-label="会话视图">
+            <div>
+              <button :aria-pressed="sessionView === 'conversation'" @click="sessionView = 'conversation'">对话</button>
+              <button :aria-pressed="sessionView === 'summary'" @click="sessionView = 'summary'">摘要</button>
+            </div>
+            <div>
+              <button :aria-pressed="showTimeline" @click="showTimeline = !showTimeline; if (showTimeline) showWorkspace = false"><Activity :size="15" /> 执行时间线</button>
+              <button :aria-pressed="showWorkspace" @click="showWorkspace = !showWorkspace; if (showWorkspace) showTimeline = false"><FolderOpen :size="15" /> 工作空间</button>
+            </div>
           </div>
-          <div ref="chatMessages" class="chat-messages">
-            <div class="chat-intro">
+          <section v-if="sessionView === 'summary'" class="session-summary">
+            <h2>任务摘要</h2>
+            <template v-if="project.run">
+              <p>{{ project.run.model }} · {{ project.run.pattern || modeLabels[project.run.mode] }}</p>
+              <p v-if="project.run.usage">{{ project.run.usage.modelCalls }} 次模型调用 · {{ project.run.usage.promptTokens + project.run.usage.completionTokens }} tokens</p>
+              <p v-if="project.run.error" role="alert">{{ project.run.error }}</p>
+              <p class="summary-plan">{{ project.run.plan || "本次任务暂无计划摘要。" }}</p>
+            </template>
+            <p v-else>会话尚未发起任务。</p>
+          </section>
+          <div v-show="sessionView === 'conversation'" ref="chatMessages" class="chat-messages">
+            <div v-if="!project.messages.length" class="chat-intro">
               <div class="assistant-avatar"><Sparkles :size="18" /></div>
               <h3>从这里，开始创造。</h3>
               <p>
@@ -878,7 +959,7 @@ onUnmounted(() => {
               </div>
               <p>{{ m.content }}</p>
               <div v-if="m.imageUrl" class="message-image">
-                <button @click="view = 'images'">
+                <button @click="view = 'images'; showWorkspace = true; showTimeline = false">
                   <img
                     :src="m.imageUrl"
                     alt="根据需求生成的图片"
@@ -896,7 +977,7 @@ onUnmounted(() => {
                   class="spin"
                   :size="16"
                 />{{
-                  awaitingApproval ? "任务等待审批" : paused
+                  awaitingApproval ? (project.run?.approvalTool ? `工具等待审批 · ${project.run.approvalNode ? project.run.approvalNode + " · " : ""}${project.run.approvalTool}` : "任务等待审批") : paused
                     ? "任务已暂停"
                     : project.run?.status === "ANSWERING"
                       ? "正在思考并回答"
@@ -924,77 +1005,75 @@ onUnmounted(() => {
                   :size="13"
                 /><span v-else class="step-dot"></span>{{ s.label }}
               </div>
-              <div class="run-controls">
-                <template v-if="awaitingApproval">
+              <p v-if="awaitingApproval && project.run?.approvalReason" class="plan-text">
+                {{ project.run.approvalReason }}
+              </p>
+              <template v-if="awaitingApproval && project.run?.planReviewVersion && !project.run.approvalTool">
+                <p class="plan-text">当前计划 · 第 {{ project.run.planReviewVersion }} 版</p>
+                <p class="plan-text" style="white-space: pre-wrap">{{ project.run.plan }}</p>
+                <form class="run-controls" @submit.prevent="revisePlan">
+                  <textarea v-model="planFeedback" aria-label="计划修改意见" maxlength="2000"
+                    placeholder="填写希望 Agent 修改的地方" rows="3" :disabled="controlling"></textarea>
+                  <button class="button small" :disabled="controlling || !planFeedback.trim()">提交反馈</button>
+                </form>
+              </template>
+              <div v-if="awaitingApproval" class="run-controls">
+                <span v-if="project.run?.supervisorReview">等待独立审批人决定</span>
+                <template v-else>
                   <button class="button small primary" :disabled="controlling" @click="controlRun('approve')">
-                    批准并运行
+                    {{ project.run?.planReviewVersion && !project.run.approvalTool ? `批准第 ${project.run.planReviewVersion} 版并执行` : "批准并运行" }}
                   </button>
-                  <button class="button small" :disabled="controlling" @click="controlRun('reject')">
-                    拒绝任务
-                  </button>
+                  <button class="button small" :disabled="controlling" @click="controlRun('reject')">拒绝任务</button>
                 </template>
-                <button
-                  v-else-if="paused"
-                  class="button small primary"
-                  :disabled="controlling"
-                  @click="controlRun('resume')"
-                >
-                  <Play :size="13" />恢复任务</button
-                ><button
-                  v-else
-                  class="button small"
-                  :disabled="controlling"
-                  @click="controlRun('pause')"
-                >
-                  <Pause :size="13" />暂停任务</button
-                ><span v-if="paused"
-                  >已完成的步骤会保留，恢复时重试未完成的模型请求。</span
-                >
               </div>
-              <p v-if="project.run?.plan" class="plan-text">
+              <p v-else-if="paused" class="plan-text">已完成的步骤会保留，恢复时重试未完成的模型请求。</p>
+              <SwarmInput v-if="project.run?.swarmAcceptingInput" :key="project.run.id" :run-id="project.run.id" />
+              <p v-if="project.run?.plan && !(awaitingApproval && project.run.planReviewVersion && !project.run.approvalTool)" class="plan-text">
                 {{ project.run.plan }}
               </p>
             </div>
-            <AgentTrace
-              v-if="project.run?.steps?.length"
-              :steps="project.run.steps"
-              :status="project.run.status"
-              :usage="project.run.usage"
-              :pattern="project.run.pattern"
-              :nodes="project.run.nodes"
-            />
+            <div v-if="project.run?.planReviewVersion" class="plan-text">
+                <button class="button small" @click="showPlanHistory = !showPlanHistory">
+                  {{ showPlanHistory ? "收起审核历史" : "查看审核历史" }}
+                </button>
+                <ul v-if="showPlanHistory && planReview">
+                  <li v-for="revision in planReview.revisions" :key="revision.version">
+                    <strong>第 {{ revision.version }} 版</strong>
+                    <p v-if="revision.feedback">{{ revision.feedback }}</p>
+                    <p style="white-space: pre-wrap">{{ revision.plan_text }}</p>
+                  </li>
+                </ul>
+            </div>
+            <p v-if="project.run?.skill" class="plan-text">本次技能 {{ project.run.skill }}</p>
             <div v-if="error" class="error-banner">
               <CircleAlert :size="14" />{{ error }}
             </div>
           </div>
-          <form class="chat-composer" @submit.prevent="submit">
+          <form v-show="sessionView === 'conversation'" class="chat-composer" @submit.prevent="submit">
             <textarea
               v-model="prompt"
               :disabled="busy"
               aria-label="提出修改需求"
-              :placeholder="placeholder"
+              :placeholder="paused ? '任务已暂停…' : awaitingApproval ? '等待审批…' : (active || creating) ? '等待 Agent 完成…' : placeholder"
               @keydown="composerKeydown"
               maxlength="10000"
             ></textarea>
-            <PatternControls v-if="mode === 'build'" :value="selectedPattern" :config="config" :disabled="busy" @change="selectPattern" />
             <div class="composer-foot">
-              <ModeControls
-                :mode="mode"
-                :model="selectedModel"
-                :config="config"
-                :disabled="busy"
-                @mode="selectMode"
-                @model="selectModel"
-              /><button
-                class="send-button"
-                :disabled="busy || !prompt.trim()"
-                aria-label="发送需求"
-              >
-                <Pause v-if="paused" :size="17" /><LoaderCircle
-                  v-else-if="busy"
-                  class="spin"
-                  :size="17"
-                /><ArrowUp v-else :size="18" />
+              <ComposerOptions :mode="mode" :config="config" :model="selectedModel" :pattern="selectedPattern"
+                :skills="availableSkills" :skill="activeSkill ? selectedSkill : ''" :disabled="busy"
+                @model="selectModel" @pattern="selectPattern" @skill="selectedSkill = $event"
+              />
+              <div v-if="active || paused || awaitingApproval" class="composer-run-actions" aria-label="任务控制">
+                <button v-if="active || paused" type="button" class="composer-run-pause"
+                  :aria-label="paused ? '继续任务' : '暂停任务'" :title="paused ? '继续任务' : '暂停任务'"
+                  :disabled="controlling" @click="controlRun(paused ? 'resume' : 'pause')">
+                  <Play v-if="paused" :size="17" /><Pause v-else :size="17" />
+                </button>
+                <button type="button" class="composer-run-stop" aria-label="终止任务" title="终止任务"
+                  :disabled="controlling" @click="controlRun('cancel')"><Square :size="17" /></button>
+              </div>
+              <button v-else type="submit" class="send-button" :disabled="busy || !prompt.trim()" aria-label="发送需求">
+                <LoaderCircle v-if="creating" class="spin" :size="17" /><ArrowUp v-else :size="18" />
               </button>
             </div>
           </form>
@@ -1007,11 +1086,26 @@ onUnmounted(() => {
                   ? "图片单独计费 · 每次生成一张"
                   : mode === "chat"
                     ? "对话不会修改代码或创建版本"
-                    : "AI 可能出错，请在预览中验证实际功能"
+                    : mode === "research" ? "研究结果以报告所列资料为准"
+                      : "AI 可能出错，请在预览中验证实际功能"
             }}
           </div>
         </section>
-        <section class="output-panel">
+            <aside v-if="showTimeline" class="session-timeline" aria-label="执行时间线">
+            <header><h2>执行时间线</h2><button class="icon-button" aria-label="关闭时间线" @click="showTimeline = false"><X :size="16" /></button></header>
+            <p v-if="!project.run?.swarmBoard?.length && !project.run?.steps?.length && !project.run?.nodes?.length">暂无执行事件。</p>
+            <SwarmBoard v-if="project.run?.swarmBoard?.length" :teams="project.run.swarmBoard"
+              :run-status="project.run.status" />
+            <AgentTrace
+              v-if="project.run?.steps?.length || project.run?.nodes?.length"
+              :steps="project.run.steps || []"
+              :status="project.run.status"
+              :usage="project.run.usage"
+              :pattern="project.run.mode === 'research' ? 'research' : project.run.pattern"
+              :nodes="project.run.nodes"
+            />
+            </aside>
+        <section v-show="showWorkspace" class="output-panel">
           <div class="preview-toolbar">
             <div class="view-switch">
               <button
@@ -1183,6 +1277,13 @@ onUnmounted(() => {
             </div>
           </div>
           <div v-else class="code-area">
+            <button v-if="selectedVersion || project.currentVersion" type="button" class="button small"
+              :aria-expanded="showDocumentSearch" @click="showDocumentSearch = !showDocumentSearch">
+              <Search :size="14" />搜索版本文档
+            </button>
+            <DocumentSearch v-if="showDocumentSearch && (selectedVersion || project.currentVersion)"
+              :key="selectedVersion || project.currentVersion || ''" :project-id="project.id"
+              :version-id="selectedVersion || project.currentVersion || ''" @open="selectedFile = $event" />
             <div v-if="sourceNames.length > 3" class="source-file-picker">
               <FolderOpen :size="14" /><select
                 v-model="selectedFile"
@@ -1273,6 +1374,57 @@ onUnmounted(() => {
         </section>
       </div>
     </main>
+    <dialog ref="agentDialog" class="modal atoms-agent-dialog" aria-labelledby="atoms-agent-title">
+      <div class="modal-heading">
+        <h2 id="atoms-agent-title">选择 Agent</h2>
+        <button class="icon-button" aria-label="关闭 Agent 选择" @click="agentDialog?.close()"><X :size="18" /></button>
+      </div>
+      <div class="atoms-agent-list">
+        <button v-for="(label, value) in modeLabels" :key="value"
+          :disabled="busy && mode !== value" :aria-pressed="mode === value"
+          @click="selectMode(value); agentDialog?.close()">
+          <component :is="{build: Code2, chat: MessageSquare, research: Search, image: ImageIcon}[value]" :size="19" />
+          <span><strong>{{ label }}</strong><small>{{ agentDescriptions[value] }}</small></span>
+          <Check v-if="mode === value" :size="15" />
+        </button>
+      </div>
+    </dialog>
+    <GatewayMemoryPanel v-if="showGatewayMemory" @close="showGatewayMemory = false" />
+    <GatewayAccount v-if="showGatewayAccount" :dark="darkTheme" @close="showGatewayAccount = false" />
+    <div v-if="showSkills" class="modal-backdrop" @click.self="showSkills = false" @keydown.esc="showSkills = false">
+      <section class="modal atoms-account-sheet" role="dialog" aria-modal="true" aria-labelledby="workbench-skills-title">
+        <div class="modal-heading">
+          <h2 id="workbench-skills-title">技能</h2>
+          <button class="icon-button" aria-label="关闭技能列表" @click="showSkills = false"><X :size="18" /></button>
+        </div>
+        <p v-if="!config.skills?.length">当前后端没有配置技能。</p>
+        <p v-else-if="!availableSkills.length">当前 Agent 或执行方式没有可用技能。</p>
+        <div v-else class="atoms-skill-list">
+          <button v-for="skill in availableSkills" :key="`${skill.name}@${skill.version}`" class="button"
+            :disabled="busy" :aria-pressed="activeSkill === skill" @click="selectedSkill = `${skill.name}@${skill.version}`; showSkills = false">
+            {{ skill.name }} <small>{{ skill.version }}</small>
+          </button>
+        </div>
+      </section>
+    </div>
+    <div v-if="showAccountUsage || showAccountSettings" class="modal-backdrop" @click.self="showAccountUsage = false; showAccountSettings = false" @keydown.esc="showAccountUsage = false; showAccountSettings = false">
+      <section class="modal atoms-account-sheet" role="dialog" aria-modal="true" aria-labelledby="account-sheet-title">
+        <div class="modal-heading">
+          <h2 id="account-sheet-title">{{ showAccountUsage ? "用量与费用" : "账号设置" }}</h2>
+          <button class="icon-button" aria-label="关闭账号详情" @click="showAccountUsage = false; showAccountSettings = false"><X :size="18" /></button>
+        </div>
+        <template v-if="showAccountUsage">
+          <p>当前工作台会话的已计量用量</p>
+          <dl><dt>Token</dt><dd>{{ projects.some(item => item.totalTokens != null) ? tokenFormat.format(accountUsage) : "暂无计量" }}</dd>
+          <dt>费用</dt><dd>{{ accountCost == null ? "暂无计量" : currency.format(accountCost) }}</dd></dl>
+        </template>
+        <template v-else><p>{{ accountName }}</p><p v-if="accountEmail">{{ accountEmail }}</p><p v-if="gatewayUser">租户 {{ gatewayUser.tenant_id }}</p></template>
+      </section>
+    </div>
+    <SchedulePanel v-if="showSchedules" @close="showSchedules = false"
+      @login="showSchedules = false; showGatewayAccount = true" />
+    <SupervisorReviewsPanel v-if="showSupervisorReviews" @close="showSupervisorReviews = false" />
+    <DaemonApprovalsPanel v-if="showDaemonApprovals" @close="showDaemonApprovals = false" />
     <div v-if="history" class="modal-backdrop" @click.self="history = false">
       <section
         class="modal version-modal"

@@ -13,6 +13,7 @@ public interface ToolContext extends DagExecutor.Runtime {
     void stage(String stage) throws InterruptedException;
     Map<String, String> workspace();
     Map<String, String> baseline();
+    String searchDocuments(String query);
     Map<String, String> files();
     void files(Map<String, String> files);
     int generations();
@@ -28,6 +29,10 @@ public interface ToolContext extends DagExecutor.Runtime {
     String analyze(String aspect, String instructions) throws Exception;
     String proposeDag() throws Exception;
     boolean dynamicDagEnabled();
+    default boolean dynamicDagEditsEnabled() { return false; }
+    default String proposeDagEdit(String aspect, String instructions) throws Exception {
+        throw new UnsupportedOperationException("动态 DAG 源码节点不可用");
+    }
     String verifyCandidate() throws Exception;
     Map<String, String> generate(String planDetails) throws Exception;
     Review review(Map<String, String> files) throws Exception;

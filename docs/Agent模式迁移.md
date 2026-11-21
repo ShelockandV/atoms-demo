@@ -85,7 +85,7 @@
 
 ### 配置远程 MCP 工具
 
-在后端私有配置设置 `atoms.agent.mcp-tools-file`，指向运维维护的 JSON 数组。例如：
+在后端 `application.yml` 设置 `atoms.agent.mcp-tools-file`，指向运维维护的 JSON 数组。例如：
 
 ```json
 [
@@ -100,7 +100,14 @@
 ]
 ```
 
-重启后工具出现在 `GET /api/agent/tools`。模型只能填入声明的字符串参数。端点、远程工具名称和只读认定由运维负责，需确认远程实现及其数据处理方式。当前适配器按 MCP `2026-07-28` 无状态 Streamable HTTP 发送 `tools/call`，只接收单条 JSON 响应中的文本或结构化结果。请求共用固定 DNS 的出站防护和 16 KiB 响应限制。自动发现、凭据与 OAuth、SSE 响应、stdio、旧版握手及交互和任务扩展尚未接入。
+重启后工具出现在 `GET /api/agent/tools`。端点、远程工具名称和只读认定由运维配置。MCP 调用支持文本或结构化结果，保留固定 DNS、同源限制和 16 KiB 响应上限。
+
+- **自动发现**。将 `parameters` 替换为 `"discover": true`，启动时按 `tools/list` 分页寻找指定的 `remoteName`。支持字符串、整数、数字和布尔参数，以及字符串枚举。远端发现的其他工具不会自动注册。
+- **OAuth**。HTTP 工具定义可加入 `oauth`，配置 `tokenEndpoint`、`clientId`、`clientSecret`，以及可选 `scope` 和 `resource`。使用客户端凭据模式获取并刷新 Bearer 令牌。请把含密钥的清单保存在部署方管理的私有位置。
+- **旧版 SSE**。将 `transport` 设置为 `legacy-sse`，`endpoint` 填写服务的独立 SSE 地址。客户端读取 `endpoint` 事件后，只向同源地址发送初始化与工具请求。
+- **stdio**。将 `transport` 设置为 `stdio`，用 `stdioImage` 指定本机已有、会启动 MCP stdio 服务的可信 Docker 镜像，并移除 `endpoint`。每次调用在无外网、非 root、只读根文件系统的容器中完成，JSON-RPC 按行传输。可与自动发现一起使用。
+
+默认的 `streamable-http` 使用 MCP `2026-07-28` 无状态请求，支持单条 JSON 或同一个 POST 的 SSE 响应。OAuth 浏览器授权、多轮服务器交互和任务扩展仍未接入。
 
 ## 三种执行策略
 
@@ -173,7 +180,7 @@ atoms:
 - HTTP 请求发出前，Java 按序列化请求的 UTF-8 字节数、固定余量和最大输出额度预留 token 预算。数据库事务同时检查请求次数和剩余预算，多节点并发与暂停恢复使用同一账本。
 - 供应商返回用量时，以实际输入与输出 token 结算。请求失败、用量缺失或执行令牌失效时保留预留，防止未知成本被重复使用。任务接口的 `usage.chargedTokens` 包含已结算 token 和尚未释放的预留。预留是估算，供应商实际用量可能超过估算，结算后会阻止后续超预算请求。
 - 配置快速模型后，模型下拉框会出现“自动选择”。300 字以内的问答或新建构建任务可选快速档，已有基准版本、DAG 构建和较长请求走默认模型。显式指定模型优先。
-- 主模型返回 HTTP 429、502、503 或 504 时，可尝试一次同模式、同供应商的备用模型。每次尝试独立扣除调用次数与预留额度。快速及备用模型均须在对应模式白名单内。任务的模型字段仍记录初选模型。本功能作用于文本模型调用。
+- 主模型返回可重试 HTTP 错误、传输失败或熔断时，可尝试一次同模式的备用模型。备用模型可以路由到独立供应商。每次尝试独立扣除调用次数与预留额度。快速及备用模型均须在对应模式白名单内。任务的模型字段仍记录初选模型。本功能作用于文本模型调用。
 - 文本模型按模型分别累计可重试 HTTP 故障和网络 I/O 故障。默认连续 3 次打开熔断，冷却 30 秒后放行一次探测。熔断期间跳过该模型并按白名单尝试备用模型，跳过的模型不会消耗预算。用 `atoms.agent.routing.circuit-failure-threshold` 和 `atoms.agent.routing.circuit-cooldown-seconds` 调整，阈值设为 0 可关闭。状态由同一实例内的任务共享，重启后重置。
 
 ## 恢复与兼容
@@ -182,7 +189,13 @@ atoms:
 
 已完成的动作不会重复调用模型。暂停时正在进行的动作可能已经在供应商侧执行，恢复时可能重新调用；这是可重试的虚拟源码生成，不承诺外部请求严格执行一次。已经预占的模型调用次数不会退回。旧请求迟到后会被执行令牌拒绝写入。
 
-当前仍是单实例调度与人工恢复，不具备 Temporal 的分布式租约、事件历史确定性重放和多实例故障接管。完成的 `FINISH` 检查点只代表准备保存，最终是否保存以任务 `SUCCEEDED` 与版本记录为准。
+单实例会从数据库自动调度排队任务，并在启动时重新排队上次中断的任务。手动暂停与待审批状态保留。可选 Temporal 模式为每个任务启动独立 Workflow，由 Activity 执行当前 Agent 逻辑。Temporal 记录调度历史并重试失联的 Activity，业务库检查点负责动作恢复。Research 各阶段和模板角色子任务已拥有独立的 Workflow 和 Activity 历史。模板认知策略的模型步骤也已接入独立 Worker。原生 Temporal 父子关系和版本化重放仍待迁移。完成的 `FINISH` 检查点只代表准备保存，最终是否保存以任务 `SUCCEEDED` 与版本记录为准。
+
+## 动态 DAG 并行修改源码
+
+在 `application.yml` 同时启用 `atoms.agent.dynamic-dag` 与 `atoms.agent.dynamic-dag-edits`。动态 DAG 首轮生成按已保存的分析计划运行最多两个并行节点。每个节点返回相对路径到完整文件内容的映射，`null` 表示删除。节点结果持久化，暂停恢复时复用已完成的结果。
+
+合并保留未参与修改的基准文件，相同改动只应用一次。不同节点修改同一文件、路径冲突或结果未通过源码校验时，交由完整生成步骤统一修订。最终候选仍经过原有校验与复核流程。
 
 ## 其他模式的迁移设计与状态
 
@@ -190,11 +203,11 @@ atoms:
 
 | 模式 | Shannon 参考位置 | Java 落点及前置条件 |
 | --- | --- | --- |
-| 动态开发 DAG、多节点修改源码 | `strategies/dag.go`、`patterns/execution/` | 已支持可选的模型动态分析图与节点恢复；多节点修改源码仍需定义输出契约和合并冲突处理 |
+| 动态开发 DAG、多节点修改源码 | `strategies/dag.go`、`patterns/execution/` | 已支持可选的模型动态分析图与节点恢复；启用 `dynamic-dag-edits` 可按节点并行修改并合并源码 |
 | Swarm、Debate、Tree of Thoughts | `swarm_workflow.go`、`patterns/debate.go`、`tree_of_thoughts.go` | 节点和共享预算完成后增加角色、候选结果、评选及收敛条件；不能简单并发调用模型后覆盖同一源码快照 |
-| Token 预算、模型分层与故障降级 | `middleware_budget.go`、`internal/budget/`、`internal/models/` | 已实现估算预留、实际用量结算、自动选型及同供应商备用模型。供应商 tokenizer 精确计数、跨供应商降级仍待迁移 |
-| Temporal 长任务可靠性 | `go/orchestrator/internal/workflows/` | 可选引入 Temporal Java SDK；需要单独的 Temporal 服务、Activity 幂等键和工作流版本升级策略，Java 可直接实现 |
-| MCP 和外部工具加载 | `python/llm-service/llm_service/tools/registry.py` | 已支持运维显式批准的远程只读工具调用。自动发现、授权、旧协议兼容及副作用工具审批仍待迁移 |
+| Token 预算、模型分层与故障降级 | `middleware_budget.go`、`internal/budget/`、`internal/models/` | 已实现估算预留、实际用量结算、自动选型及跨供应商备用模型。精准 tokenizer 计数和对齐全部供应商协议仍待迁移 |
+| Temporal 长任务可靠性 | `go/orchestrator/internal/workflows/` | 已接入 Temporal Java SDK 和本地 Docker 服务，任务级 Activity 重试通过执行令牌保护持久化写入。节点级 Activity、子工作流及工作流版本升级仍待迁移 |
+| MCP 和外部工具加载 | `python/llm-service/llm_service/tools/registry.py` | 已支持已批准的只读工具、自动发现、OAuth 客户端凭据、stdio 和旧版 SSE。浏览器授权与副作用工具审批仍待迁移 |
 | 动态工具工厂与出站 SSRF 防护 | `tools/plugin_loader.py`、`tools/openapi_tool.py` | 已实现受控 JSON 公网 GET 工厂和 OpenAPI 只读子集导入，图片下载和工厂工具共用 `PublicHttps`。网络出口隔离、广泛 OpenAPI 兼容、外部 MCP 及其权限仍待迁移 |
 | Skills、可配置流程 | `config/skills/`、`template_workflow.go` | 本地受控配置加载器与可执行工具权限分离；技能文本不能扩大执行权限 |
 | 隔离编译与浏览器验收 | Rust Agent Core / WASI、Playwright 服务 | 已接入可选的 Docker Maven 测试与 Chromium 静态页面冒烟检查。启动生成的后端服务、联调和业务交互测试仍待实施 |

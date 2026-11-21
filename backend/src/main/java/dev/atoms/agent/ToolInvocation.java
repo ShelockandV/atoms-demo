@@ -9,6 +9,8 @@ import dev.atoms.workspace.IsolatedAcceptance;
 import dev.atoms.agent.tool.*;
 import dev.atoms.agent.tool.builtin.ToolContext;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -29,6 +31,9 @@ final class ToolInvocation implements ToolContext {
     int generations;
     boolean validated, reviewed, finished;
     IsolatedAcceptance acceptance;
+    TemporalTaskRuntime analysisWorker;
+    private List<Map<String, String>> supervisorMessages;
+    private int supervisorOutputLimit;
 
     public String verifyCandidate() throws Exception {
         return acceptance == null ? "" : acceptance.verify(files);
@@ -52,6 +57,11 @@ final class ToolInvocation implements ToolContext {
         generations = state.generations();
         validated = state.validated();
         reviewed = state.reviewed();
+    }
+
+    @Override
+    public String searchDocuments(String query) {
+        return store.encode(store.searchRunDocuments(rid, owner, query));
     }
 
     public void checkActive() throws InterruptedException {
@@ -101,12 +111,56 @@ final class ToolInvocation implements ToolContext {
 
     public boolean dynamicDagEnabled() { return model.dynamicDagEnabled(); }
 
+    public boolean dynamicDagEditsEnabled() { return model.dynamicDagEditsEnabled(); }
+
+    public String proposeDagEdit(String aspect, String instructions) throws Exception {
+        if (analysisWorker != null) {
+            return analysisWorker.agentNode(this, new TemporalTaskRuntime.AgentNodeInput(rid, token, null, 0,
+                    "build.dag-edit." + aspect, null, aspect, Map.of(), instructions, null));
+        }
+        return model.proposeDagEdit(prompt, project, instructions, selectedModel);
+    }
+
     public String proposeDag() throws Exception {
-        return model.proposeDag(prompt, plan, project, selectedModel);
+        if (analysisWorker != null) {
+            var input = new TemporalTaskRuntime.AgentNodeInput(rid, token, null, 0, "build.dag-plan",
+                    null, "", Map.of(), plan, null);
+            return analysisWorker.agentNode(this, input);
+        }
+        return model.proposeDag(prompt, plan, project, store.stageModel(rid, "planning", selectedModel));
+    }
+
+    void configureTextSupervisor() throws com.fasterxml.jackson.core.JsonProcessingException {
+        var request = model.json().readTree(store.taskContext(rid));
+        List<Map<String, String>> messages = model.json().convertValue(request.path("messages"),
+                new com.fasterxml.jackson.core.type.TypeReference<>() {});
+        supervisorMessages = messages.stream().filter(message -> !"tool".equals(message.get("role")))
+                .filter(message -> !message.get("content").isBlank())
+                .map(message -> Map.of("role", message.get("role"), "content", message.get("content"))).toList();
+        supervisorOutputLimit = request.path("max_tokens").asInt();
+    }
+
+    boolean isTextSupervisor() {
+        return supervisorMessages != null;
     }
 
     public String analyze(String aspect, String instructions) throws Exception {
-        return model.analyze(prompt, project, aspect, instructions, selectedModel);
+        if (isTextSupervisor()) {
+            boolean synthesis = aspect.endsWith(".supervisor.synthesis");
+            if (model.isDemo()) return "【演示多角色回答】" + prompt;
+            var messages = new ArrayList<>(supervisorMessages);
+            messages.add(Map.of("role", "user", "content", instructions));
+            try (var tracking = ModelBudget.trackWithOutputLimit(model, store, rid, owner, token,
+                    settings.maxModelCalls(), synthesis ? supervisorOutputLimit : 0)) {
+                return model.completion(messages, selectedModel);
+            }
+        }
+        if (analysisWorker != null) {
+            var input = new TemporalTaskRuntime.AgentNodeInput(rid, token, null, 0, "build.analysis." + aspect,
+                    null, aspect, Map.of(), instructions, null);
+            return analysisWorker.agentNode(this, input);
+        }
+        return model.analyze(prompt, project, aspect, instructions, store.stageModel(rid, "planning", selectedModel));
     }
 
     public Map<String, String> generate(String planDetails) throws Exception {
@@ -114,7 +168,7 @@ final class ToolInvocation implements ToolContext {
     }
 
     public Review review(Map<String, String> candidate) throws Exception {
-        var result = model.review(prompt, project, candidate, selectedModel);
+        var result = model.review(prompt, project, candidate, store.stageModel(rid, "review", selectedModel));
         return new Review(result.passed(), result.feedback());
     }
 }

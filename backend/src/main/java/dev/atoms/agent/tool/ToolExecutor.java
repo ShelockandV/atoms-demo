@@ -17,6 +17,10 @@ public final class ToolExecutor<C> {
 
     public ToolExecutor(ToolRegistry<C> registry) { this.registry = registry; }
 
+    public static boolean isConfiguredReadTool(AgentTool<?> tool) {
+        return tool instanceof HttpToolFactory.ReadTool<?> || tool instanceof McpToolFactory.ReadTool<?>;
+    }
+
     /**
      * 允许调用方在执行前后验证任务是否仍有效。
      *
@@ -36,7 +40,7 @@ public final class ToolExecutor<C> {
             if (metadata.requiresAuth() || metadata.dangerous())
                 throw new IllegalArgumentException("当前运行环境未提供此工具要求的认证或审批：" + metadata.name());
             if (metadata.scope() != ToolMetadata.Scope.VIRTUAL_WORKSPACE
-                    && !(tool instanceof HttpToolFactory.ReadTool<?> || tool instanceof McpToolFactory.ReadTool<?>))
+                    && !isConfiguredReadTool(tool))
                 throw new IllegalArgumentException("当前工具没有获准的执行范围");
             if (metadata.sessionAware() && (owner == null || owner.isBlank()))
                 throw new IllegalArgumentException("工具要求有效项目会话");

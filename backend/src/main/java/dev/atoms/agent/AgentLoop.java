@@ -57,6 +57,8 @@ public final class AgentLoop {
     private final ToolExecutor<? super ToolInvocation> tools;
     private final ExecutionPattern pattern;
     private final IsolatedAcceptance acceptance;
+    private final TemporalTaskRuntime temporal;
+    private final TaskApprovalPolicy approvalPolicy;
 
     AgentLoop(Store store, ModelClient model, AgentSettings settings) {
         this(store, model, settings, PatternRegistry.require("react"));
@@ -68,16 +70,33 @@ public final class AgentLoop {
 
     AgentLoop(Store store, ModelClient model, AgentSettings settings, ExecutionPattern pattern,
               IsolatedAcceptance acceptance) {
+        this(store, model, settings, pattern, acceptance, null);
+    }
+
+    AgentLoop(Store store, ModelClient model, AgentSettings settings, ExecutionPattern pattern,
+              IsolatedAcceptance acceptance, TemporalTaskRuntime temporal) {
+        this(store, model, settings, pattern, acceptance, temporal, null);
+    }
+
+    AgentLoop(Store store, ModelClient model, AgentSettings settings, ExecutionPattern pattern,
+              IsolatedAcceptance acceptance, TemporalTaskRuntime temporal, TaskApprovalPolicy approvalPolicy) {
+        this.approvalPolicy = approvalPolicy;
         this.store = store;
         this.model = model;
         this.settings = settings;
         this.tools = new ToolExecutor<>(model.tools());
         this.pattern = pattern;
         this.acceptance = acceptance;
+        this.temporal = temporal;
     }
 
     Map<String, String> execute(String rid, String owner, String token, String prompt,
                                 String plan, ProjectContext context, String selectedModel) throws Exception {
+        return execute(rid, owner, token, prompt, plan, context, selectedModel, false);
+    }
+
+    Map<String, String> execute(String rid, String owner, String token, String prompt, String plan,
+                                ProjectContext context, String selectedModel, boolean singleAction) throws Exception {
         Snapshot state = store.agentSnapshot(rid);
         if (state == null) {
             // Adopt checkpoints created by the previous generation/repair implementation.
@@ -103,7 +122,7 @@ public final class AgentLoop {
                     try {
                         var current = state;
                         decision = pattern.select(new ExecutionPattern.Input(model.isDemo(), progress(current),
-                                () -> chooseAction(model, prompt, plan, context, current, settings, selectedModel)));
+                                () -> decideWithRuntime(rid, owner, token, prompt, plan, context, current, selectedModel)));
                     } catch (IllegalArgumentException e) {
                         decision = new Decision("INVALID", "", e.getMessage());
                     }
@@ -114,8 +133,18 @@ public final class AgentLoop {
                 store.agentStep(rid, owner, token, state, "RUNNING", decision.summary());
             }
             Decision decision = state.pending();
+            if (approvalPolicy != null && approvalPolicy.evaluatesTool(decision.action())
+                    && toolEligibleForApproval(decision)
+                    && !store.toolApprovalGranted(rid, state.step(), decision.action())) {
+                String reason = approvalPolicy.toolRequirement(owner, rid, state.step(), decision.action());
+                if (reason != null) {
+                    store.awaitToolApproval(rid, owner, token, state.step(), decision.action(), reason);
+                    return null;
+                }
+            }
             var invocation = new ToolInvocation(store, model, settings, rid, owner, token, prompt, plan, context, selectedModel, state);
             invocation.acceptance = acceptance;
+            invocation.analysisWorker = temporal;
             ToolResult result = invocation.execute(tools, decision);
             String observation = result.success() ? result.observation() : clip(result.observation(), 2000);
             String outcome = result.success() ? "SUCCEEDED" : "FAILED";
@@ -132,11 +161,23 @@ public final class AgentLoop {
             if (!result.success() && state.generations() >= settings.maxGenerations()
                     && Set.of("GENERATE", "VALIDATE", "REVIEW").contains(decision.action()))
                 throw new IllegalArgumentException(observation);
+            if (singleAction && !state.finished()) return null;
         }
         if (state.files().isEmpty() || !state.validated()
                 || (!model.isDemo() && (settings.requireReview() || !pattern.name().equals("react")) && !state.reviewed()))
             throw new IllegalArgumentException("Agent 结束前必须满足源码校验与所需复核条件");
         return state.files();
+    }
+
+    private boolean toolEligibleForApproval(Decision decision) {
+        try {
+            var registry = model.tools();
+            var tool = registry.require(decision.action());
+            registry.validate(tool, decision.arguments(), model.json());
+            return !tool.metadata().dangerous() && !tool.metadata().requiresAuth();
+        } catch (IllegalArgumentException invalid) {
+            return false;
+        }
     }
 
     static Map<String, String> workspace(Snapshot state, ProjectContext context) {
@@ -147,9 +188,28 @@ public final class AgentLoop {
     static Decision chooseAction(ModelClient model, String prompt, String plan, ProjectContext project,
                                  Snapshot state, AgentSettings settings, String selectedModel) throws Exception {
         if (model.isDemo()) return offlineDecision(state);
-        var input = new ModelClient.ActionInput(workspace(state, project).keySet(), state.step(), settings.maxSteps(),
+        return decide(model, prompt, plan, project, actionInput(state, project, settings), selectedModel);
+    }
+
+    private Decision decideWithRuntime(String rid, String owner, String token, String prompt, String plan,
+                                       ProjectContext context, Snapshot state, String selectedModel) throws Exception {
+        if (temporal == null || model.isDemo())
+            return chooseAction(model, prompt, plan, context, state, settings, selectedModel);
+        var runtime = new ToolInvocation(store, model, settings, rid, owner, token, prompt, plan, context, selectedModel, state);
+        var input = new TemporalTaskRuntime.AgentNodeInput(rid, token, null, 0,
+                "build.agent-decision." + state.step(), null, store.encode(actionInput(state, context, settings)),
+                Map.of(), plan, null);
+        return model.json().readValue(temporal.agentNode(runtime, input), Decision.class);
+    }
+
+    private static ModelClient.ActionInput actionInput(Snapshot state, ProjectContext project, AgentSettings settings) {
+        return new ModelClient.ActionInput(workspace(state, project).keySet(), state.step(), settings.maxSteps(),
                 state.generations(), settings.maxGenerations(), !state.files().isEmpty(), state.validated(),
                 settings.requireReview(), state.reviewed(), state.observations());
+    }
+
+    static Decision decide(ModelClient model, String prompt, String plan, ProjectContext project,
+                           ModelClient.ActionInput input, String selectedModel) throws Exception {
         var selected = model.decide(prompt, plan, project, input, selectedModel);
         return new Decision(selected.action(), selected.path(), selected.summary(), selected.arguments());
     }

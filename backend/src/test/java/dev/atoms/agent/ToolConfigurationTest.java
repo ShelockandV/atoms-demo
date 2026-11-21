@@ -32,7 +32,7 @@ class ToolConfigurationTest {
             context.register(ToolConfiguration.class);
             context.refresh();
             var registry = context.getBean(ToolRegistry.class);
-            assertEquals(9, registry.catalog().size());
+            assertEquals(dev.atoms.agent.tool.builtin.BuiltinTools.create().size() + 2, registry.catalog().size());
             assertEquals("HTTP_DOCS", registry.require("HTTP_DOCS").metadata().name());
             assertEquals("HTTP_OPENAPI_DOCS", registry.require("HTTP_OPENAPI_DOCS").metadata().name());
         }

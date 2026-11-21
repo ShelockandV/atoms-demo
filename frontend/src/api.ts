@@ -1,5 +1,13 @@
-export type Mode = "build" | "chat" | "image";
+export type Mode = "build" | "chat" | "image" | "research";
+export interface SkillSummary {
+  name: string;
+  version: string;
+  description: string;
+  requires_tools: string[];
+  requires_role: string;
+}
 export interface ModelConfig {
+  skills?: SkillSummary[];
   learningRouting?: boolean;
   patterns?: { id: string; description: string }[];
   templates?: { id: string; name: string; description: string; version: string }[];
@@ -17,7 +25,26 @@ export interface Version {
   files: Files;
   createdAt: string;
 }
+export interface SwarmTeam {
+  id: string;
+  planning: string;
+  review: string;
+  synthesis: string;
+  replanning?: string;
+  tasks: { id: string; role: string; query: string; dependencies: string[]; status: string;
+    outboxStatus: string; inboxStatus: string; followup?: boolean; round?: number;
+    peerRounds?: { round: number; outboxStatus: string; inboxStatus: string }[] }[];
+}
 export interface Run {
+  approvalReason?: string;
+  approvalId?: string;
+  approvalTool?: string;
+  approvalNode?: string;
+  planReviewVersion?: number;
+  supervisorReview?: boolean;
+  swarmAcceptingInput?: boolean;
+  swarmBoard?: SwarmTeam[];
+  skill?: string;
   nodes?: {
     id: string;
     dependencies: string[];
@@ -31,6 +58,7 @@ export interface Run {
   steps?: AgentStep[];
   usage?: {
     modelCalls: number;
+    models?: { model: string; meteredCalls: number; promptTokens: number; completionTokens: number }[];
     meteredCalls: number;
     promptTokens: number;
     completionTokens: number;
@@ -55,6 +83,12 @@ export interface AgentStep {
   updatedAt: string;
 }
 export interface Project {
+  latestMode?: Mode | null;
+  latestModel?: string | null;
+  latestPattern?: string | null;
+  runCount?: number;
+  costUsd?: number | null;
+  totalTokens?: number | null;
   id: string;
   title: string;
   currentVersion: string | null;
@@ -78,11 +112,15 @@ export async function api<T>(
   path: string,
   method = "GET",
   body?: unknown,
+  options: Pick<RequestInit, "headers" | "signal"> = {},
 ): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (body !== undefined) headers.set("Content-Type", "application/json");
   const response = await fetch("/api" + path, {
     method,
     credentials: "same-origin",
-    headers: body === undefined ? {} : { "Content-Type": "application/json" },
+    headers,
+    signal: options.signal,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {

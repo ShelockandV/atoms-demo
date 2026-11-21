@@ -1,15 +1,23 @@
 package dev.atoms.web;
 
+import dev.atoms.agent.TaskApprovalPolicy;
 import dev.atoms.agent.GenerationService;
+import dev.atoms.agent.GatewayAgents;
+import dev.atoms.agent.ScheduledTasks;
+import dev.atoms.agent.TemporalTaskRuntime;
 import dev.atoms.agent.model.ModelCatalog;
 import dev.atoms.agent.model.ModelClient;
 import dev.atoms.agent.pattern.PatternRegistry;
 import dev.atoms.agent.pattern.LearningRouter;
 import dev.atoms.agent.persistence.Store;
+import dev.atoms.agent.skill.Skill;
 import dev.atoms.agent.skill.SkillCatalog;
+import dev.atoms.agent.tool.ToolMetadata;
 import dev.atoms.agent.pattern.WorkflowTemplates;
+import dev.atoms.workspace.GatewayMemoryFiles;
 import dev.atoms.workspace.SourceFiles;
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import jakarta.servlet.http.HttpSession;
 import org.springframework.web.bind.annotation.*;
@@ -22,6 +30,7 @@ import jakarta.annotation.PreDestroy;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 接收项目和任务请求，并提供版本、导出及 SSE 执行进度接口。
@@ -38,10 +47,17 @@ public class ApiController {
     final SkillCatalog skills;
     final WorkflowTemplates templates;
     final LearningRouter learningRouter;
+    final ScheduledTasks scheduledTasks;
     final ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
 
+    private final GatewayTaskEvents gatewayEvents;
+    private final GatewayAgents agents;
+    private final GatewayMemoryFiles memory;
+    private final TaskApprovalPolicy approvalPolicy;
+
     ApiController(Store store, GenerationService generation, ModelClient model, ModelCatalog catalog, SkillCatalog skills,
-                  WorkflowTemplates templates, LearningRouter learningRouter) {
+                  WorkflowTemplates templates, LearningRouter learningRouter, ScheduledTasks scheduledTasks,
+                  GatewayTaskEvents gatewayEvents, TaskApprovalPolicy approvalPolicy, GatewayAgents agents, GatewayMemoryFiles memory) {
         this.catalog = catalog;
         this.store = store;
         this.generation = generation;
@@ -49,6 +65,11 @@ public class ApiController {
         this.skills = skills;
         this.templates = templates;
         this.learningRouter = learningRouter;
+        this.scheduledTasks = scheduledTasks;
+        this.gatewayEvents = gatewayEvents;
+        this.agents = agents;
+        this.memory = memory;
+        this.approvalPolicy = approvalPolicy;
         scheduler.setPoolSize(2);
         scheduler.initialize();
     }
@@ -85,11 +106,12 @@ public class ApiController {
     }
 
     /** 接收 Shannon 单任务请求，例如在已有 session_id 上继续提问。 */
-    record TaskInput(String query, @com.fasterxml.jackson.annotation.JsonProperty("session_id") String sessionId,
+    record TaskInput(String query, @JsonProperty("session_id") String sessionId,
                      Map<String, Object> context, String mode, String skill,
-                     @com.fasterxml.jackson.annotation.JsonProperty("model_override") String modelOverride,
+                     @JsonProperty("model_override") String modelOverride,
                      @JsonAlias("template_name") String template, @JsonAlias("template_version") String templateVersion,
-                     @JsonAlias("disable_ai") boolean requireTemplate) {}
+                     @JsonAlias("disable_ai") boolean requireTemplate,
+                     @JsonProperty("research_strategy") String researchStrategy) {}
 
     private String gatewayOwner(HttpSession session) {
         var request = org.springframework.web.context.request.RequestContextHolder.currentRequestAttributes();
@@ -99,10 +121,18 @@ public class ApiController {
 
     @PostMapping("/v1/tasks")
     @ResponseStatus(HttpStatus.CREATED)
-    Object submitTask(@RequestBody TaskInput input, HttpSession session) {
+    Map<String, Object> submitTask(@RequestBody TaskInput input, HttpSession session,
+                                   jakarta.servlet.http.HttpServletRequest request) {
         if (input.query() == null || input.query().isBlank() || input.query().length() > 10000)
             throw Store.error(400, "query 须为1～10000字");
-        var context = input.context() == null ? Map.<String, Object>of() : input.context();
+        var context = new LinkedHashMap<String, Object>();
+        if (input.context() != null) context.putAll(input.context());
+        context.remove("workflow_model_completion");
+        if (input.researchStrategy() != null) {
+            if (!Set.of("quick", "standard", "deep", "academic").contains(input.researchStrategy()))
+                throw Store.error(400, "research_strategy 须为 quick、standard、deep 或 academic");
+            context.put("research_strategy", input.researchStrategy());
+        }
         if (store.encode(context).length() > 16000) throw Store.error(400, "context 超过长度限制");
         String name = input.template();
         if (name == null || name.isBlank()) name = context.get("template") instanceof String value
@@ -112,8 +142,9 @@ public class ApiController {
         boolean required = input.requireTemplate() || Boolean.TRUE.equals(context.get("disable_ai"));
         var template = templates.route(name, version, required);
         String mode = input.mode() == null || input.mode().isBlank() ? "simple" : input.mode();
-        if (template == null && !Set.of("simple", "standard", "complex", "dag", "auto").contains(mode))
-            throw Store.error(400, "当前任务入口支持 simple、standard、complex、dag 和 auto");
+        if (template == null && !Set.of("simple", "standard", "complex", "dag", "auto", "research").contains(mode))
+            throw Store.error(400, "当前任务入口支持 simple、standard、complex、dag、auto 和 research");
+        boolean research = template == null && ("research".equals(mode) || Boolean.TRUE.equals(context.get("force_research")));
         String pattern = template != null ? "reflection" : switch (mode) {
             case "complex", "dag" -> "dag";
             case "standard" -> "react";
@@ -126,16 +157,53 @@ public class ApiController {
                 ? store.createGatewaySession(owner) : store.project(input.sessionId(), owner);
         String id = (String) project.get("id");
         @SuppressWarnings("unchecked")
-        var queued = (Map<String, Object>) run(id, new RunInput(input.query(), (String) project.get("currentVersion"),
-                pattern == null ? "chat" : "build", input.modelOverride(), pattern, input.skill(),
-                template == null ? null : name, template == null ? null : version, required), session, owner, context);
-        return Map.of("task_id", queued.get("id"), "session_id", id,
-                "status", "TASK_STATUS_QUEUED", "created_at", queued.get("createdAt"));
+        var queued = (Map<String, Object>) run(id, new RunInput(input.query(), (String) project.get("current_version"),
+                research ? "research" : pattern == null ? "chat" : "build", input.modelOverride(), pattern, input.skill(),
+                template == null ? null : name, template == null ? null : version, required), session, owner, context,
+                GatewayMemoryController.taskScope(request));
+        var result = new LinkedHashMap<String, Object>(Map.of("task_id", queued.get("id"), "session_id", id,
+                "status", "TASK_STATUS_QUEUED", "created_at", queued.get("createdAt")));
+        if ("AWAITING_APPROVAL".equals(queued.get("status"))) {
+            result.put("awaiting_approval", true);
+            result.put("approval_id", queued.get("id"));
+            if (queued.get("approvalReason") instanceof String reason) result.put("approval_reason", reason);
+        }
+        return result;
+    }
+
+    @PostMapping("/v1/tasks/stream")
+    ResponseEntity<Map<String, String>> submitTaskForStreaming(@RequestBody TaskInput input, HttpSession session,
+                                                               jakarta.servlet.http.HttpServletRequest request) {
+        var task = submitTask(input, session, request);
+        String id = (String) task.get("task_id");
+        String streamUrl = "/api/v1/stream/sse?workflow_id=" + id;
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .header("X-Workflow-ID", id)
+                .header("X-Session-ID", (String) task.get("session_id"))
+                .header("Link", "<" + streamUrl + ">; rel=stream")
+                .body(Map.of("workflow_id", id, "task_id", id, "stream_url", streamUrl));
     }
 
     @GetMapping("/v1/tasks/{id}")
     Object taskStatus(@PathVariable String id, HttpSession session) {
         return store.simpleTask(id, gatewayOwner(session));
+    }
+
+    @GetMapping("/v1/tasks/{id}/review")
+    ResponseEntity<Map<String, Object>> getTaskReview(@PathVariable String id, HttpSession session) {
+        String owner = gatewayOwner(session);
+        var task = store.simpleTask(id, owner);
+        if (!Boolean.TRUE.equals(task.get("awaiting_approval"))) throw Store.error(404, "任务暂无待审批记录");
+        var run = store.run(id, owner);
+        var result = new LinkedHashMap<String, Object>();
+        result.put("status", "pending");
+        result.put("round", 0);
+        result.put("version", 1);
+        result.put("current_plan", Objects.toString(run.get("plan"), ""));
+        result.put("rounds", List.of());
+        result.put("query", task.get("query"));
+        if (task.get("approval_reason") instanceof String reason) result.put("approval_reason", reason);
+        return ResponseEntity.ok().eTag("1").body(result);
     }
 
     /** 接收模板审批动作，例如 action 为 approve。 */
@@ -148,6 +216,27 @@ public class ApiController {
         store.simpleTask(id, owner);
         generation.approve(id, owner, true);
         return store.simpleTask(id, owner);
+    }
+
+    record ApprovalDecision(
+            @JsonProperty("workflow_id") String workflowId,
+            @JsonProperty("approval_id") String approvalId,
+            @JsonProperty("run_id") String runId,
+            Boolean approved) {}
+
+    @PostMapping("/v1/approvals/decision")
+    Object submitApprovalDecision(@RequestBody ApprovalDecision input, HttpSession session) {
+        if (input.workflowId() == null || input.workflowId().isBlank()
+                || input.approvalId() == null || input.approvalId().isBlank() || input.approved() == null)
+            throw Store.error(400, "须提供 workflow_id、approval_id 和 approved");
+        String owner = gatewayOwner(session);
+        store.simpleTask(input.workflowId(), owner);
+        if (input.runId() != null && !input.runId().isEmpty() && !input.workflowId().equals(input.runId()))
+            throw Store.error(404, "审批请求不存在");
+        generation.approve(input.workflowId(), owner, input.approved(), input.approvalId());
+        return Map.of("status", "sent", "success", true, "message", "Approval decision recorded",
+                "workflow_id", input.workflowId(), "approval_id", input.approvalId(),
+                "run_id", Objects.toString(input.runId(), ""));
     }
 
     @GetMapping("/v1/sessions")
@@ -179,6 +268,328 @@ public class ApiController {
         return store.gatewayHistory(id, gatewayOwner(session));
     }
 
+    @GetMapping("/v1/sessions/{id}/events")
+    Object sessionEvents(@PathVariable String id, @RequestParam(defaultValue = "") String limit,
+                         @RequestParam(defaultValue = "") String offset, HttpSession session) {
+        int pageSize = parseTaskPageParameter(limit, 10);
+        if (pageSize < 1 || pageSize > 100) pageSize = 10;
+        return store.gatewaySessionEvents(id, gatewayOwner(session), pageSize,
+                Math.max(0, parseTaskPageParameter(offset, 0)));
+    }
+
+    record WorkspaceEntry(String name, String path,
+                          @JsonProperty("is_dir") boolean directory,
+                          @JsonProperty("size_bytes") int sizeBytes) {}
+
+    @GetMapping("/v1/sessions/{id}/documents/search")
+    Object searchWorkspaceDocuments(@PathVariable String id, @RequestParam String query, HttpSession session) {
+        return Map.of("hits", store.searchGatewayDocuments(id, gatewayOwner(session), query));
+    }
+
+    @GetMapping("/v1/sessions/{id}/files")
+    Object listWorkspaceFiles(@PathVariable String id, @RequestParam(defaultValue = "") String path,
+                              HttpSession session) {
+        if (!path.isEmpty()) validateWorkspacePath(path);
+        var files = store.gatewayWorkspaceFiles(id, gatewayOwner(session));
+        String prefix = path.isEmpty() ? "" : path + "/";
+        var entries = new TreeMap<String, WorkspaceEntry>();
+        files.forEach((file, content) -> {
+            if (!file.startsWith(prefix)) return;
+            String relative = file.substring(prefix.length());
+            int separator = relative.indexOf('/');
+            if (separator < 0) {
+                entries.put(relative, new WorkspaceEntry(relative, file, false,
+                        content.getBytes(StandardCharsets.UTF_8).length));
+            } else {
+                String directory = relative.substring(0, separator);
+                entries.putIfAbsent(directory, new WorkspaceEntry(directory, prefix + directory, true, 0));
+            }
+        });
+        if (!path.isEmpty() && entries.isEmpty()) throw Store.error(404, "目录不存在");
+        return Map.of("success", true, "files", entries.values());
+    }
+
+    @GetMapping("/v1/sessions/{id}/files/{*path}")
+    Object downloadWorkspaceFile(@PathVariable String id, @PathVariable String path, HttpSession session) {
+        String file = path.startsWith("/") ? path.substring(1) : path;
+        validateWorkspacePath(file);
+        var files = store.gatewayWorkspaceFiles(id, gatewayOwner(session));
+        String content = files.get(file);
+        if (content == null) {
+            if (files.keySet().stream().anyMatch(name -> name.startsWith(file + "/")))
+                throw Store.error(400, "该路径是目录");
+            throw Store.error(404, "文件不存在");
+        }
+        return Map.of("success", true, "content", content, "content_type", "text/plain; charset=utf-8",
+                "size_bytes", content.getBytes(StandardCharsets.UTF_8).length);
+    }
+
+    private static void validateWorkspacePath(String path) {
+        if (path.length() > 240 || path.indexOf('\\') >= 0 || path.indexOf(':') >= 0
+                || path.codePoints().anyMatch(Character::isISOControl)
+                || Arrays.stream(path.split("/", -1))
+                .anyMatch(part -> part.isBlank() || part.equals(".") || part.equals("..")))
+            throw Store.error(400, "须提供有效的工作区相对路径");
+    }
+
+    @PostMapping("/v1/schedules")
+    @ResponseStatus(HttpStatus.CREATED)
+    Object createSchedule(@RequestBody ScheduledTasks.Input input, HttpSession session, jakarta.servlet.http.HttpServletRequest request) {
+        return scheduledTasks.create(gatewayOwner(session), input, DaemonApprovalController.requester(request));
+    }
+
+    @GetMapping("/v1/schedules")
+    Object listSchedules(@RequestParam(defaultValue = "1") int page,
+                         @RequestParam(name = "page_size", defaultValue = "50") int size,
+                         @RequestParam(defaultValue = "") String status, HttpSession session) {
+        return scheduledTasks.list(gatewayOwner(session), Math.max(1, page), schedulePageSize(size), status);
+    }
+
+    @GetMapping("/v1/schedules/{id}")
+    Object schedule(@PathVariable String id, HttpSession session) {
+        return scheduledTasks.get(id, gatewayOwner(session));
+    }
+
+    @PutMapping("/v1/schedules/{id}")
+    Object updateSchedule(@PathVariable String id, @RequestBody ScheduledTasks.Input input, HttpSession session, jakarta.servlet.http.HttpServletRequest request) {
+        return scheduledTasks.update(id, gatewayOwner(session), input, DaemonApprovalController.requester(request));
+    }
+
+    @PostMapping("/v1/schedules/{id}/pause")
+    Object pauseSchedule(@PathVariable String id, HttpSession session) {
+        return scheduledTasks.changeStatus(id, gatewayOwner(session), "PAUSED");
+    }
+
+    @PostMapping("/v1/schedules/{id}/resume")
+    Object resumeSchedule(@PathVariable String id, HttpSession session) {
+        return scheduledTasks.changeStatus(id, gatewayOwner(session), "ACTIVE");
+    }
+
+    @DeleteMapping("/v1/schedules/{id}")
+    Object deleteSchedule(@PathVariable String id, HttpSession session) {
+        return scheduledTasks.changeStatus(id, gatewayOwner(session), "DELETED");
+    }
+
+    @GetMapping("/v1/schedules/{id}/runs")
+    Object scheduleRuns(@PathVariable String id, @RequestParam(defaultValue = "1") int page,
+                        @RequestParam(name = "page_size", defaultValue = "50") int size, HttpSession session) {
+        return scheduledTasks.runs(id, gatewayOwner(session), Math.max(1, page), schedulePageSize(size));
+    }
+
+    private static int schedulePageSize(int size) {
+        return size < 1 || size > 100 ? 50 : size;
+    }
+
+    @GetMapping("/v1/skills")
+    Object gatewaySkills(@RequestParam(defaultValue = "") String category, HttpSession session) {
+        gatewayOwner(session);
+        var available = skills.available();
+        var latest = new LinkedHashMap<String, Skill>();
+        for (var skill : available) {
+            if (category.isEmpty() || category.equals(skill.category())) latest.putIfAbsent(skill.name(), skill);
+        }
+        return Map.of("skills", latest.values().stream().map(Skill::summary).toList(), "count", latest.size(),
+                "categories", available.stream().map(Skill::category).distinct().sorted().toList());
+    }
+
+    @GetMapping("/v1/skills/{reference}")
+    Object gatewaySkill(@PathVariable String reference, HttpSession session) {
+        gatewayOwner(session);
+        var skill = skills.available().stream()
+                .filter(entry -> entry.name().equals(reference) || entry.reference().equals(reference))
+                .findFirst().orElseThrow(() -> Store.error(404, "技能不存在"));
+        return Map.of("skill", skill);
+    }
+
+    @GetMapping("/v1/skills/{name}/versions")
+    Object gatewaySkillVersions(@PathVariable String name, HttpSession session) {
+        gatewayOwner(session);
+        var versions = skills.available().stream().filter(skill -> skill.name().equals(name))
+                .map(Skill::summary).toList();
+        if (versions.isEmpty()) throw Store.error(404, "技能不存在");
+        return Map.of("name", name, "versions", versions, "count", versions.size());
+    }
+
+    @GetMapping("/v1/tools")
+    Object gatewayTools(@RequestParam(defaultValue = "") String category, HttpSession session) {
+        gatewayOwner(session);
+        var result = new ArrayList<Map<String, Object>>();
+        for (var tool : model.toolCatalog()) {
+            var metadata = (ToolMetadata) tool.get("metadata");
+            if (!metadata.dangerous() && (category.isEmpty() || category.equals(metadata.category()))) {
+                result.add(Map.of("name", metadata.name(), "description", metadata.description(),
+                        "parameters", tool.get("parameters")));
+            }
+        }
+        return result;
+    }
+
+    @GetMapping("/v1/agents")
+    Object gatewayAgents() {
+        var available = agents.list();
+        return Map.of("agents", available, "count", available.size());
+    }
+
+    @GetMapping("/v1/agents/{id}")
+    Object gatewayAgent(@PathVariable String id) { return agents.get(id); }
+
+    record AgentInput(Map<String, Object> input, @JsonProperty("session_id") String sessionId) {}
+
+    @PostMapping("/v1/agents/{id}")
+    ResponseEntity<Map<String, Object>> runGatewayAgent(@PathVariable String id, @RequestBody AgentInput request,
+                                                       HttpSession session) {
+        var input = request.input() == null ? Map.<String, Object>of() : request.input();
+        String tool = agents.validate(id, input);
+        String owner = gatewayOwner(session);
+        var submitted = queueGatewayTool(owner, request.sessionId(), "Execute agent " + id, id, tool, input);
+        var result = new LinkedHashMap<String, Object>();
+        result.put("task_id", submitted.id());
+        result.put("agent_id", id);
+        result.put("status", "TASK_STATUS_QUEUED");
+        result.put("created_at", submitted.createdAt());
+        if (submitted.approval() != null) result.putAll(toolApproval(submitted));
+        return ResponseEntity.accepted().header("X-Workflow-ID", submitted.id()).header("X-Session-ID", submitted.session()).body(result);
+    }
+
+    private record QueuedGatewayTool(String id, String session, Object createdAt, String approval) {}
+
+    private QueuedGatewayTool queueGatewayTool(String owner, String session, String prompt, String agent,
+                                               String tool, Map<String, Object> input) {
+        String approval = approvalPolicy.requirement(owner, prompt, GatewayAgents.MODE, tool, "react",
+                null, null, List.of(tool));
+        String pid = session;
+        if (pid == null || pid.isBlank()) pid = (String) store.createGatewaySession(owner).get("id");
+        store.gatewaySession(pid, owner);
+        String base = (String) store.project(pid, owner).get("current_version");
+        var context = Map.<String, Object>of("agent", agent, "agent_tool", tool, "agent_input", input);
+        var run = store.queue(pid, owner, prompt, base, GatewayAgents.MODE, tool, "react", null, null, context, approval);
+        String id = (String) run.get("id");
+        generation.submit(id, pid, owner, prompt, base, GatewayAgents.MODE, tool);
+        return new QueuedGatewayTool(id, pid, run.get("createdAt"), approval);
+    }
+
+    private static Map<String, Object> toolApproval(QueuedGatewayTool task) {
+        return Map.of("task_id", task.id(), "awaiting_approval", true, "approval_id", task.id(),
+                "approval_reason", task.approval());
+    }
+
+    record ToolInput(Map<String, Object> arguments, @JsonProperty("session_id") String sessionId) {}
+
+    @PostMapping("/v1/tools/{name}/execute")
+    Object executeGatewayTool(@PathVariable String name, @RequestBody ToolInput input,
+                              jakarta.servlet.http.HttpServletRequest request) {
+        if (!(request.getAttribute("gatewayOwner") instanceof String owner))
+            throw Store.error(401, "直接工具执行需要 Gateway 身份凭据");
+        var arguments = input.arguments() == null ? Map.<String, Object>of() : input.arguments();
+        agents.validateDirectTool(name, arguments);
+        var task = queueGatewayTool(owner, input.sessionId(), "Execute tool " + name, "", name, arguments);
+        if (task.approval() != null)
+            return toolResponse(409, task, toolApproval(task));
+        return waitForTool(owner, task);
+    }
+
+    private static ResponseEntity<Map<String, Object>> toolResponse(int status, QueuedGatewayTool task, Map<String, Object> body) {
+        return ResponseEntity.status(status).header("X-Workflow-ID", task.id())
+                .header("X-Session-ID", task.session()).body(body);
+    }
+
+    private org.springframework.web.context.request.async.DeferredResult<ResponseEntity<Map<String, Object>>> waitForTool(
+            String owner, QueuedGatewayTool task) {
+        var timeout = toolResponse(504, task, Map.of("success", false, "error", "等待工具结果超时", "task_id", task.id()));
+        var result = new org.springframework.web.context.request.async.DeferredResult<ResponseEntity<Map<String, Object>>>(
+                60_000L, timeout);
+        var worker = Thread.ofVirtual().unstarted(() -> {
+            try {
+                while (!result.isSetOrExpired()) {
+                    var current = store.simpleTask(task.id(), owner);
+                    String status = (String) current.get("status");
+                    if ("TASK_STATUS_COMPLETED".equals(status)) {
+                        String output = Objects.toString(current.get("result"), "");
+                        result.setResult(toolResponse(200, task, Map.of("success", true, "output", output, "text", output)));
+                        return;
+                    }
+                    if (Set.of("TASK_STATUS_FAILED", "TASK_STATUS_CANCELLED", "TASK_STATUS_TIMEOUT").contains(status)) {
+                        result.setResult(toolResponse(200, task, Map.of("success", false,
+                                "error", Objects.toString(current.get("error"), status))));
+                        return;
+                    }
+                    Thread.sleep(200);
+                }
+            } catch (InterruptedException stopped) {
+                Thread.currentThread().interrupt();
+            } catch (RuntimeException failure) {
+                result.setErrorResult(failure);
+            }
+        });
+        result.onCompletion(worker::interrupt);
+        result.onTimeout(worker::interrupt);
+        worker.start();
+        return result;
+    }
+
+    @GetMapping("/v1/tools/{name}")
+    Object gatewayTool(@PathVariable String name, HttpSession session) {
+        gatewayOwner(session);
+        for (var tool : model.toolCatalog()) {
+            var metadata = (ToolMetadata) tool.get("metadata");
+            if (!metadata.name().equals(name)) continue;
+            if (metadata.dangerous()) throw Store.error(403, "工具不可通过 Gateway 查询");
+            return Map.of("name", metadata.name(), "description", metadata.description(),
+                    "category", metadata.category(), "version", metadata.version(), "parameters", tool.get("parameters"),
+                    "timeout_seconds", metadata.timeoutSeconds(), "cost_per_use", 0);
+        }
+        throw Store.error(404, "工具不存在");
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private TemporalTaskRuntime temporal;
+
+    @GetMapping(value = "/v1/blob/{key}", produces = "text/plain;charset=UTF-8")
+    Object gatewayBlob(@PathVariable String key, jakarta.servlet.http.HttpServletRequest request) {
+        if (!(request.getAttribute("gatewayOwner") instanceof String owner))
+            throw Store.error(401, "Blob 下载需要 Gateway 身份凭据");
+        return store.gatewayBlob(owner, key);
+    }
+
+    @GetMapping("/v1/tasks/{id}/timeline")
+    Object taskTimeline(@PathVariable String id,
+                        @RequestParam(name = "run_id", defaultValue = "") String runId,
+                        @RequestParam(defaultValue = "summary") String mode, HttpSession session) {
+        store.simpleTask(id, gatewayOwner(session));
+        if (temporal == null) throw Store.error(503, "当前部署未启用 Temporal");
+        if (!Set.of("summary", "full").contains(mode)) throw Store.error(400, "timeline mode 无效");
+        return temporal.timeline(id, runId, "full".equals(mode));
+    }
+
+    record SwarmMessage(String message) {}
+
+    @GetMapping("/v1/swarm/{id}/board")
+    Object gatewaySwarmBoard(@PathVariable String id, HttpSession session) {
+        String owner = gatewayOwner(session);
+        store.simpleTask(id, owner);
+        var run = store.run(id, owner);
+        Object board = run.get("swarmBoard");
+        if (board == null) throw Store.error(404, "任务没有 Swarm 任务板");
+        return Map.of("teams", board, "accepting_input", run.get("swarmAcceptingInput"));
+    }
+
+    @PostMapping("/v1/swarm/{id}/message")
+    Object sendGatewaySwarmMessage(@PathVariable String id, @RequestBody SwarmMessage input, HttpSession session) {
+        String owner = gatewayOwner(session);
+        store.simpleTask(id, owner);
+        return store.addSwarmHumanMessage(id, owner, input.message());
+    }
+
+    @PostMapping("/runs/{id}/swarm/message")
+    Object sendWorkbenchSwarmMessage(@PathVariable String id, @RequestBody SwarmMessage input, HttpSession session) {
+        return store.addSwarmHumanMessage(id, owner(session), input.message());
+    }
+
+    @GetMapping("/v1/tasks/{id}/control-state")
+    Object taskControlState(@PathVariable String id, HttpSession session) {
+        return store.gatewayControlState(id, gatewayOwner(session));
+    }
+
     @GetMapping("/v1/tasks/{id}/events")
     Object taskEvents(@PathVariable String id, @RequestParam(defaultValue = "") String limit,
                       @RequestParam(defaultValue = "") String offset, HttpSession session) {
@@ -204,33 +615,14 @@ public class ApiController {
     }
 
     private SseEmitter streamEvents(String id, String cursor, String types, String owner) {
-        store.simpleTask(id, owner);
-        long start;
-        try {
-            start = cursor == null || cursor.isBlank() ? 0 : Long.parseLong(cursor);
-            if (start < 0) throw new NumberFormatException();
-        } catch (NumberFormatException error) {
-            throw Store.error(400, "无效的事件游标");
-        }
-        Set<String> filter = new HashSet<>(Arrays.asList(types.split(",")));
+        var subscription = gatewayEvents.subscribe(id, cursor, types, owner);
         var emitter = new SseEmitter(180000L);
         var worker = Thread.ofVirtual().unstarted(() -> {
-            long last = start;
             try {
                 emitter.send(SseEmitter.event().comment("connected to workflow " + id));
-                while (!Thread.currentThread().isInterrupted()) {
-                    var status = store.simpleTask(id, owner).get("status");
-                    var events = store.taskEventsAfter(id, last);
-                    for (var event : events) {
-                        last = ((Number) event.get("seq")).longValue();
-                        String type = (String) event.get("type");
-                        if (types.isBlank() || filter.contains(type))
-                            emitter.send(SseEmitter.event().id(Long.toString(last)).name(type).data(event));
-                    }
-                    if (events.size() == 200) continue;
-                    if (Set.of("TASK_STATUS_COMPLETED", "TASK_STATUS_FAILED", "TASK_STATUS_CANCELLED").contains(status)) break;
-                    Thread.sleep(500);
-                }
+                gatewayEvents.follow(subscription, event -> emitter.send(SseEmitter.event()
+                                .id(event.get("seq").toString()).name((String) event.get("type")).data(event)),
+                        () -> emitter.send(SseEmitter.event().comment("ping")));
                 emitter.complete();
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
@@ -315,6 +707,8 @@ public class ApiController {
         config.put("configured", model.isConfigured());
         config.put("patterns", PatternRegistry.catalog());
         config.put("templates", templates.catalog());
+        config.put("skills", skills.available().stream().filter(skill -> !skill.dangerous())
+                .map(Skill::summary).toList());
         config.put("learningRouting", learningRouter.enabled());
         return config;
     }
@@ -365,6 +759,12 @@ public class ApiController {
         return store.detail(id, owner(s));
     }
 
+    @GetMapping("/projects/{id}/documents/search")
+    Object searchProjectDocuments(@PathVariable String id, @RequestParam(required = false) String versionId,
+                                  @RequestParam String query, HttpSession session) {
+        return Map.of("hits", store.searchProjectDocuments(id, owner(session), versionId, query));
+    }
+
     @GetMapping("/projects/{id}/versions")
     Object versions(@PathVariable String id, HttpSession s) {
         store.project(id, owner(s));
@@ -373,10 +773,11 @@ public class ApiController {
 
     @PostMapping("/projects/{id}/runs")
     Object run(@PathVariable String id, @RequestBody RunInput input, HttpSession s) {
-        return run(id, input, s, owner(s), null);
+        return run(id, input, s, owner(s), null, null);
     }
 
-    private Object run(String id, RunInput input, HttpSession s, String owner, Map<String, Object> context) {
+    private Object run(String id, RunInput input, HttpSession s, String owner, Map<String, Object> context,
+                       String memoryScope) {
         if (input.prompt() == null || input.prompt().isBlank() || input.prompt().length() > 10000)
             throw Store.error(400, "需求须为1～10000字");
         String mode = catalog.mode(input.mode());
@@ -392,6 +793,7 @@ public class ApiController {
         String selectedModel = catalog.route(mode, input.model(), input.prompt(), input.baseVersion(), requestedPattern);
         String pattern = PatternRegistry.resolveName("build".equals(mode) ? requestedPattern : "react");
         if (skill != null) {
+            if ("research".equals(mode)) throw Store.error(400, "研究模式暂不支持技能");
             if (skill.dangerous()) throw Store.error(403, "当前身份不能执行危险技能");
             if ("image".equals(mode)) throw Store.error(400, "图像模式不支持技能");
             if ("dag".equals(pattern) && !skill.requiresRole().isBlank())
@@ -403,6 +805,8 @@ public class ApiController {
                 skill.requiresTools().forEach(registry::require);
             }
         }
+        String approval = approvalPolicy.requirement(owner, input.prompt(), mode, selectedModel, pattern, skill, template);
+        String recalledMemory = memory.recall(memoryScope);
         synchronized (s) {
             Long start = (Long) s.getAttribute("quotaStart");
             Integer count = (Integer) s.getAttribute("quotaCount");
@@ -412,7 +816,8 @@ public class ApiController {
                 count = 0;
             }
             if (count >= 20) throw Store.error(429, "每个会话每小时最多生成20次，请稍后再试");
-            var run = store.queue(id, owner, input.prompt(), input.baseVersion(), mode, selectedModel, pattern, skill, template, context);
+            var run = store.queue(id, owner, input.prompt(), input.baseVersion(), mode, selectedModel, pattern, skill, template, context, approval, recalledMemory,
+                    memory.captureScope(memoryScope), catalog.stageModels(mode, input.model()));
             s.setAttribute("quotaStart", start);
             s.setAttribute("quotaCount", count + 1);
             generation.submit((String) run.get("id"), id, owner, input.prompt(), input.baseVersion(), mode, selectedModel);
@@ -430,9 +835,29 @@ public class ApiController {
         return generation.resume(id, owner(s));
     }
 
+    @PostMapping("/runs/{id}/cancel")
+    Object cancelWorkbenchRun(@PathVariable String id, HttpSession session) {
+        String owner = owner(session);
+        generation.cancel(id, owner);
+        return store.run(id, owner);
+    }
+
+    record PlanFeedback(int version, String feedback) {}
+
+    @GetMapping("/runs/{id}/plan-review")
+    Object planReview(@PathVariable String id, HttpSession session) {
+        return store.planReview(id, owner(session));
+    }
+
+    @PostMapping("/runs/{id}/plan-review")
+    Object revisePlan(@PathVariable String id, @RequestBody PlanFeedback feedback, HttpSession session) {
+        return generation.revisePlan(id, owner(session), feedback.version(), feedback.feedback());
+    }
+
     @PostMapping("/runs/{id}/approval")
-    Object approve(@PathVariable String id, @RequestParam boolean approved, HttpSession s) {
-        return generation.approve(id, owner(s), approved);
+    Object approve(@PathVariable String id, @RequestParam boolean approved,
+                   @RequestParam(required = false) String approvalId, HttpSession s) {
+        return generation.approve(id, owner(s), approved, approvalId);
     }
 
     @GetMapping("/runs/{id}")

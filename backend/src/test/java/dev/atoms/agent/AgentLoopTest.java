@@ -107,7 +107,6 @@ class AgentLoopTest {
         assertThrows(InterruptedException.class, () -> execute(settings));
         assertEquals(validFiles("检查点"), store.agentSnapshot(rid).files());
         store.recoverJobs();
-        store.resume(rid, owner);
         token = store.claim(rid, owner);
         actions("VALIDATE", "FINISH");
         assertEquals(validFiles("检查点"), execute(settings));

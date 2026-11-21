@@ -27,7 +27,11 @@ public final class DagExecutor {
      *
      * <p>示例：<code>new Node("summary", List.of("requirements"), work)</code>。</p>
      */
-    public record Node(String id, List<String> dependencies, Work work) {
+    public record Node(String id, List<String> dependencies, Work work, int outputLimit) {
+        public Node(String id, List<String> dependencies, Work work) {
+            this(id, dependencies, work, 4000);
+        }
+
         public Node {
             dependencies = List.copyOf(dependencies);
         }
@@ -86,7 +90,7 @@ public final class DagExecutor {
                         try (var tracking = context.track()) {
                             context.checkActive();
                             String output = node.work().run(Map.copyOf(dependencies));
-                            if (output.length() > 4000) output = output.substring(0, 4000) + "\n[内容已截断]";
+                            if (output.length() > node.outputLimit()) output = output.substring(0, node.outputLimit()) + "\n[内容已截断]";
                             if (cancelled.get()) throw new InterruptedException("DAG 已取消");
                             context.checkActive();
                             context.save(node.id(), node.dependencies(), "SUCCEEDED", output,
@@ -126,7 +130,7 @@ public final class DagExecutor {
         var graph = new LinkedHashMap<String, Node>();
         for (var node : nodes) {
             if (node.id() == null || !node.id().matches("[a-zA-Z0-9_.-]{1,80}") || node.work() == null
-                    || graph.putIfAbsent(node.id(), node) != null)
+                    || node.outputLimit() < 1 || node.outputLimit() > 48_000 || graph.putIfAbsent(node.id(), node) != null)
                 throw new IllegalArgumentException("DAG 节点名称无效或重复");
             if (new HashSet<>(node.dependencies()).size() != node.dependencies().size())
                 throw new IllegalArgumentException("DAG 节点含重复依赖");

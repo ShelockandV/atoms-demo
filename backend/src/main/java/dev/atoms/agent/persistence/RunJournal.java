@@ -132,6 +132,13 @@ public final class RunJournal {
                     "completionTokens", u.get("completion_tokens")));
             var budget = db.queryForList("SELECT charged_tokens FROM agent_token_budget WHERE run_id=?", rid);
             if (!budget.isEmpty()) result.put("chargedTokens", budget.getFirst().get("charged_tokens"));
+            var models = db.queryForList("""
+                    SELECT model,metered_calls,input_tokens,output_tokens
+                    FROM agent_model_usage WHERE run_id=? ORDER BY model
+                    """, rid);
+            if (!models.isEmpty()) result.put("models", models.stream().map(model -> Map.of(
+                    "model", model.get("model"), "meteredCalls", model.get("metered_calls"),
+                    "promptTokens", model.get("input_tokens"), "completionTokens", model.get("output_tokens"))).toList());
             return result;
         }
         return Map.of();

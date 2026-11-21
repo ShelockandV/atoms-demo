@@ -18,6 +18,12 @@ public final class PromptSimilarity {
         return (double) shared / (query.size() + other.size() - shared);
     }
 
+    double coverage(String text) {
+        if (query.isEmpty()) return 0;
+        var other = features(text);
+        return (double) query.stream().filter(other::contains).count() / query.size();
+    }
+
     private static Set<Long> features(String prompt) {
         int[] points = Normalizer.normalize(prompt, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT)
                 .codePoints().filter(Character::isLetterOrDigit).toArray();

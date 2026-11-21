@@ -248,6 +248,12 @@ class ModelMeteringTest {
             assertEquals(1, ((Number) usage.get("meteredCalls")).intValue());
             assertEquals(12, ((Number) usage.get("promptTokens")).intValue());
             assertEquals(3, ((Number) usage.get("completionTokens")).intValue());
+            var models = (List<?>) usage.get("models");
+            assertEquals(1, models.size());
+            var metered = (Map<?, ?>) models.getFirst();
+            assertEquals("test", metered.get("model"));
+            assertEquals(12L, ((Number) metered.get("promptTokens")).longValue());
+            assertEquals(3L, ((Number) metered.get("completionTokens")).longValue());
             store.pause(rid, "owner");
             store.resume(rid, "owner");
             String resumed = store.claim(rid, "owner");

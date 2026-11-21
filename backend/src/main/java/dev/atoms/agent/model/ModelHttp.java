@@ -20,6 +20,10 @@ public final class ModelHttp {
     }
 
     public static URI endpoint(String base) {
+        return endpoint(base, "/chat/completions");
+    }
+
+    static URI endpoint(String base, String suffix) {
         String hint = "模型地址配置错误：请在 后端私有配置中的 atoms.model.base-url 中填写完整的 http:// 或 https:// 地址及供应商 API 路径前缀";
         if (base == null || base.isBlank()) throw new IllegalArgumentException(hint);
         try {
@@ -29,7 +33,7 @@ public final class ModelHttp {
                 throw new IllegalArgumentException(hint);
             }
             String normalized = uri.toString().replaceAll("/+$", "");
-            return URI.create(normalized.endsWith("/chat/completions") ? normalized : normalized + "/chat/completions");
+            return URI.create(normalized.endsWith(suffix) ? normalized : normalized + suffix);
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException(hint);
         }

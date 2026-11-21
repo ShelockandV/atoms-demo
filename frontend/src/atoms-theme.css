@@ -1540,3 +1540,29 @@ a:focus-visible {
   color: #999;
   font-size: 10px;
 }
+
+/* Session-first workbench */
+.session-nav{display:flex;align-items:center;gap:9px;padding:10px 12px;margin-top:9px;border-radius:8px;text-align:left}
+.session-nav[aria-current],.session-nav:hover{background:#edecfa;color:#433fb1}
+.session-history{flex:1;min-height:0;overflow:auto;padding:32px clamp(16px,4vw,56px)}
+.session-history-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+.session-history-heading h1{margin:0 auto 0 0;font-size:clamp(22px,3vw,32px);letter-spacing:-.04em;color:#272637}
+.session-search{display:flex;align-items:center;gap:9px;width:min(100%,380px);padding:8px 11px;border:1px solid #d9d7e5;border-radius:8px;color:#66627c;margin-bottom:18px}
+.session-search:focus-within{border-color:#645cde;outline:2px solid #e6e1ff}.session-search input{min-width:0;width:100%;border:0;background:transparent;color:inherit}
+.session-table-wrap{overflow-x:auto;border:1px solid #e4e0ed;border-radius:11px;background:white}
+.session-table{border-collapse:collapse;width:100%;text-align:left;white-space:nowrap;color:#49445c}
+.session-table :is(td,th){padding:12px 16px;border-bottom:1px solid #eeebf4}
+.session-table th{background:#f7f6fb;font-weight:650}.session-table tr:last-child td{border-bottom:0}
+.session-table :is(time,small){display:block;margin-top:4px;font-size:11px;color:#6d677d}
+.session-link{font-weight:650;text-align:left;padding:1px 0;color:#38306b}.session-link:hover{text-decoration:underline}
+.session-empty{text-align:center;color:#6d677d}
+.session-toolbar,.session-toolbar>div{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.session-toolbar{justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--line)}
+.session-toolbar button{display:inline-flex;align-items:center;gap:5px;border-radius:6px;padding:5px 7px;color:#51496d}
+.session-toolbar button[aria-pressed="true"],.session-toolbar button:hover{background:#eeeafa;color:#453394}
+.conversation-only .chat-panel{width:100%;height:100%;min-height:0;border:0}
+.conversation-only .chat-messages{width:100%;max-width:890px;margin-inline:auto;padding-inline:clamp(14px,4vw,32px)}
+.conversation-only .chat-composer,.conversation-only .chat-disclaimer{width:calc(100% - 28px);max-width:825px;margin-inline:auto}
+.session-summary{flex:1;min-height:0;overflow:auto;padding:20px;color:#4a425c}.summary-plan{white-space:pre-wrap}
+.session-timeline h2,.session-summary h2{font-size:16px;margin:0 0 8px}
+@media(max-width:850px){.is-workspace:not(.sidebar-hidden) .sidebar{display:flex;position:fixed;inset:0 auto 0 0;z-index:22}.session-history{padding-block:22px}}

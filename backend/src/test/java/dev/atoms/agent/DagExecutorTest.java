@@ -76,7 +76,6 @@ class DagExecutorTest {
         store.dagNode(rid, "owner", token, "first", List.of(), "SUCCEEDED", "检查点结果", 10);
         String stale = token;
         store.recoverJobs();
-        store.resume(rid, "owner");
         token = store.claim(rid, "owner");
         var results = new DagExecutor().execute(List.of(
                 new DagExecutor.Node("first", List.of(), dependencies -> { throw new AssertionError("不应重新执行"); }),

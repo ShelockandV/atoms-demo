@@ -9,7 +9,7 @@ const template = computed(() => props.config.templates?.find((template) => `temp
 
 <template>
   <div class="pattern-controls">
-    <label>
+    <label class="composer-option-row">
       执行方式
       <select
         aria-label="执行方式"
@@ -36,8 +36,7 @@ const template = computed(() => props.config.templates?.find((template) => `temp
 </template>
 
 <style scoped>
-.pattern-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 10px; color: #737373; font-size: 11px; }
-label { display: inline-flex; align-items: center; gap: 6px; }
-select { border: 1px solid #e5e5e5; border-radius: 6px; padding: 3px 5px; background: white; color: #525252; font: inherit; cursor: pointer; }
-select:disabled { opacity: 0.6; cursor: default; }
+.pattern-controls { color: inherit; }
+.pattern-controls > span { display: block; margin-top: 5px; font-size: 11px; color: var(--atoms-muted, #595959); }
+select:disabled { opacity: .6; cursor: default; }
 </style>

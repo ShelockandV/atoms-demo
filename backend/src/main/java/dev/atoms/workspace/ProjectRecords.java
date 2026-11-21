@@ -41,7 +41,32 @@ public final class ProjectRecords {
   var result=new LinkedHashMap<String,Object>();
   result.put("id",p.get("id")); result.put("title",p.get("title")); result.put("currentVersion",p.get("current_version")); result.put("updatedAt",p.get("updated_at")); return result;
  }
- public List<Map<String,Object>> projects(String owner) { return db.queryForList("SELECT * FROM projects WHERE owner_id=? ORDER BY updated_at DESC",owner).stream().map(this::projectView).toList(); }
+ public List<Map<String,Object>> projects(String owner) {
+  return db.queryForList("""
+          SELECT p.*, o.mode AS latest_mode, o.model AS latest_model, rp.pattern AS latest_pattern,
+                 (SELECT COUNT(*) FROM generation_runs r WHERE r.project_id=p.id) AS run_count,
+                 (SELECT SUM(c.usd) FROM generation_runs r JOIN agent_model_cost c ON c.run_id=r.id
+                   WHERE r.project_id=p.id) AS cost_usd,
+                 (SELECT SUM(u.input_tokens + u.output_tokens) FROM generation_runs r
+                   JOIN agent_model_usage u ON u.run_id=r.id WHERE r.project_id=p.id) AS total_tokens
+          FROM projects p
+          LEFT JOIN generation_runs latest ON latest.id=(
+              SELECT r.id FROM generation_runs r WHERE r.project_id=p.id
+              ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+          LEFT JOIN run_options o ON o.run_id=latest.id
+          LEFT JOIN run_patterns rp ON rp.run_id=latest.id
+          WHERE p.owner_id=? ORDER BY p.updated_at DESC, p.id
+          """, owner).stream().map(row -> {
+   var result = projectView(row);
+   result.put("latestMode", row.get("latest_mode"));
+   result.put("latestModel", row.get("latest_model"));
+   result.put("latestPattern", row.get("latest_pattern"));
+   result.put("runCount", row.get("run_count"));
+   result.put("costUsd", row.get("cost_usd"));
+   result.put("totalTokens", row.get("total_tokens"));
+   return result;
+  }).toList();
+ }
  public Map<String,Object> create(String owner,String title) {
   String id=UUID.randomUUID().toString(); db.update("INSERT INTO projects(id,owner_id,title,updated_at) VALUES(?,?,?,?)",id,owner,title,Instant.now().toString()); return projectView(project(id,owner));
  }
